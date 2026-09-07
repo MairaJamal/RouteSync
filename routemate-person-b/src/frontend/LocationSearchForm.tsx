@@ -9,7 +9,6 @@ import { LocationPoint, Gender, GenderPreference } from "../types";
 import InteractiveMapPicker from "./InteractiveMapPicker";
 import CoPassengerPicker, { CO_PASSENGER_OPTIONS } from "./CoPassengerPicker";
 import { isValidVehiclePlate } from "../vehicleDeclaration";
-import type { ParsedTripDraft } from "./NaturalLanguageTripInput";
 
 
 interface FieldState {
@@ -307,14 +306,12 @@ export default function LocationSearchForm({
   defaultMaxCoPassengers = 3,
   currentUserGender,
   initialUserRole = "LOOKING",
-  draft,
 }: {
   onSubmit: (value: TripSearchValue) => void;
   defaultMaxCoPassengers?: number;
   currentUserGender?: Gender;
   /** Prefill from signup (driver vs passenger). */
   initialUserRole?: UserRole;
-  draft?: ParsedTripDraft | null;
 }) {
   const [pickup, setPickup] = useState<FieldState>(emptyField);
   const [dropoff, setDropoff] = useState<FieldState>(emptyField);
@@ -339,51 +336,6 @@ export default function LocationSearchForm({
   const [vehicleMakeModel, setVehicleMakeModel] = useState("");
   const [showMap, setShowMap] = useState<boolean>(false);
   const [mapTargetMode, setMapTargetMode] = useState<"pickup" | "dropoff">("pickup");
-
-  useEffect(() => {
-    if (!draft) return;
-    if (draft.origin) {
-      setPickup({
-        query: draft.origin.address_label,
-        suggestions: [],
-        open: false,
-        loading: false,
-        selected: draft.origin,
-        geocodeError: null,
-      });
-    }
-    if (draft.destination) {
-      setDropoff({
-        query: draft.destination.address_label,
-        suggestions: [],
-        open: false,
-        loading: false,
-        selected: draft.destination,
-        geocodeError: null,
-      });
-    }
-    if (draft.requested_departure_at) {
-      try {
-        const d = new Date(draft.requested_departure_at);
-        if (!isNaN(d.getTime())) {
-          setDepartureTime(
-            `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
-          );
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-    if (draft.window_minutes) {
-      setFlexibilityMinutes(draft.window_minutes);
-    }
-    if (draft.preference) {
-      setGenderPreference(draft.preference);
-    }
-    if (draft.require_driver_gender_match !== undefined) {
-      setRequireDriverGenderMatch(draft.require_driver_gender_match);
-    }
-  }, [draft]);
 
   const rideHailingFarePkr = Number(rideHailingFareInput);
   const rideHailingFareValid = rideHailingFareInput.trim() !== "" && rideHailingFarePkr > 0;
