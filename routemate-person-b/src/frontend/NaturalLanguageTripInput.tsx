@@ -7,7 +7,7 @@
    part of the app already trusts (searchPlaces in ./places), and hands
    the fully-resolved draft back to the parent via onParsed. Drop this
    above <LocationSearchForm /> and use onParsed to prefill it. */
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { searchPlaces } from "./places";
 import { LocationPoint, GenderPreference } from "../types";
 import { API_URL } from "./apiBase";
@@ -34,42 +34,130 @@ export default function NaturalLanguageTripInput({ authToken, onParsed }: Props)
   const [error, setError] = useState<string | null>(null);
   const [lastUsedFallback, setLastUsedFallback] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
 
-  function handleVoiceInput() {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setError("Speech recognition is not supported in this browser (works best on Chrome/Edge).");
+  // Clean up recognition on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+  }, []);
+
+  async function handleVoiceInput() {
+    // If currently listening, toggle off
+    if (isListening && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        /* ignore */
+      }
+      setIsListening(false);
       return;
     }
+
+    const SpeechRecognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition ||
+      (window as any).mozSpeechRecognition ||
+      (window as any).msSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setError(
+        "Speech recognition is not supported in this browser. Please use Google Chrome or Microsoft Edge, or type your trip below."
+      );
+      return;
+    }
+
+    // Explicitly check/request microphone access so the browser prompts the user
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Release the stream immediately so the SpeechRecognition engine can capture it
+        stream.getTracks().forEach((track) => track.stop());
+      } catch (micErr: any) {
+        if (micErr?.name === "NotAllowedError" || micErr?.name === "PermissionDeniedError") {
+          setError("Microphone permission was denied. Please click the lock or tune icon in your browser's address bar to allow microphone access.");
+          return;
+        }
+        if (micErr?.name === "NotFoundError" || micErr?.name === "DevicesNotFoundError") {
+          setError("No microphone was detected on this device. Please connect a microphone or headset.");
+          return;
+        }
+      }
+    }
+
     try {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch {
+          /* ignore */
+        }
+      }
+
       const recognition = new SpeechRecognition();
-      recognition.lang = "en-US";
-      recognition.interimResults = false;
+      recognitionRef.current = recognition;
+
+      recognition.lang = navigator.language || "en-US";
+      recognition.interimResults = true;
       recognition.maxAlternatives = 1;
+      recognition.continuous = false;
 
       recognition.onstart = () => {
         setIsListening(true);
         setError(null);
       };
+
       recognition.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript;
-        setText(transcript);
-        setIsListening(false);
-      };
-      recognition.onerror = (event: any) => {
-        setIsListening(false);
-        if (event.error !== "no-speech") {
-          setError(`Voice input: ${event.error}`);
+        let finalTranscript = "";
+        let interimTranscript = "";
+
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript;
+          } else {
+            interimTranscript += event.results[i][0].transcript;
+          }
+        }
+
+        const currentText = finalTranscript || interimTranscript;
+        if (currentText.trim()) {
+          setText(currentText);
         }
       };
+
+      recognition.onerror = (event: any) => {
+        setIsListening(false);
+        const errType = event.error;
+        if (errType === "no-speech") {
+          setError("No speech was detected. Please try speaking closer to the microphone.");
+        } else if (errType === "not-allowed" || errType === "service-not-allowed") {
+          setError("Microphone access blocked. Click the lock/tune icon in your browser's address bar to allow microphone access.");
+        } else if (errType === "network") {
+          setError("Network error connecting to speech recognition service. Please check your internet connection.");
+        } else if (errType !== "aborted") {
+          setError(`Voice input error: ${errType}`);
+        }
+      };
+
       recognition.onend = () => {
         setIsListening(false);
       };
+
       recognition.start();
-    } catch (err) {
+    } catch (err: any) {
       setIsListening(false);
-      setError("Microphone access could not be started.");
+      setError(
+        err?.message?.includes("already started")
+          ? "Voice recognition already active. Please speak now."
+          : "Could not initialize voice recognition. Please type your trip description."
+      );
     }
   }
 
