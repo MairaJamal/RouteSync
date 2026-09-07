@@ -11,6 +11,7 @@ import { useState } from "react";
 import { searchPlaces } from "./places";
 import { LocationPoint, GenderPreference } from "../types";
 import { API_URL } from "./apiBase";
+import { authedFetch } from "./demoAuth";
 
 export interface ParsedTripDraft {
   origin: LocationPoint | null;
@@ -23,7 +24,7 @@ export interface ParsedTripDraft {
 }
 
 interface Props {
-  authToken: string;
+  authToken?: string;
   onParsed: (draft: ParsedTripDraft) => void;
 }
 
@@ -79,9 +80,11 @@ export default function NaturalLanguageTripInput({ authToken, onParsed }: Props)
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/api/trip-requests/parse`, {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (authToken) headers.Authorization = `Bearer ${authToken}`;
+      const res = await authedFetch(`${API_URL}/api/trip-requests/parse`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+        headers,
         body: JSON.stringify({ text }),
       });
       if (!res.ok) throw new Error(`Parse request failed (${res.status})`);

@@ -9,6 +9,7 @@ import MatchChatDrawer, { ConfirmedMatchInfo } from "./MatchChatDrawer";
 import PendingConsentsPanel from "./PendingConsentsPanel";
 import SharedRideBrowser from "./SharedRideBrowser";
 import NotificationBell from "./NotificationBell";
+import NaturalLanguageTripInput, { ParsedTripDraft } from "./NaturalLanguageTripInput";
 import { co2SavedSummary } from "../carbonImpact";
 import SosButton from "./SosButton";
 import EmergencyContactsSection from "./EmergencyContactsSection";
@@ -97,6 +98,7 @@ export default function App() {
   const [dashboardOpen, setDashboardOpen] = useState(false);
   const [demoNotice, setDemoNotice] = useState<string | null>(null);
   const [soloEstimates, setSoloEstimates] = useState<SoloFareEstimateView[]>([]);
+  const [nlDraft, setNlDraft] = useState<ParsedTripDraft | null>(null);
 
   // Day 7 state
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
@@ -743,11 +745,13 @@ export default function App() {
         }}
       >
         {/* Search Form */}
-        <section>
+        <section style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <NaturalLanguageTripInput onParsed={(draft) => setNlDraft(draft)} />
           <LocationSearchForm
             onSubmit={handleSearch}
             currentUserGender={userProfile?.gender}
             initialUserRole={preferredRole}
+            draft={nlDraft}
           />
         </section>
 
