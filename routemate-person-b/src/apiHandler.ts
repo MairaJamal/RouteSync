@@ -14,7 +14,17 @@ import {
 import { matchVerifiedDomain } from "./verification";
 import { TripRequest, RideWithBookings, RideBooking, RatingSummary } from "./types";
 import { co2SavedSummary } from "./carbonImpact";
-import { isValidPakistaniCnic, isValidVehiclePlate, normalizeCnic, normalizeVehiclePlate } from "./vehicleDeclaration";
+import {
+  isValidPakistaniCnic,
+  isValidVehiclePlate,
+  normalizeCnic,
+  normalizeVehiclePlate,
+  maskCnicToLast4,
+} from "./vehicleDeclaration";
+import {
+  getStoredVehicleDeclaration,
+  upsertStoredVehicleDeclaration,
+} from "./vehicleDeclarationStore";
 import { requireAuth, requireBodyFieldMatchesAuth, requireQueryFieldMatchesAuth } from "./auth";
 import { parseTripRequestText } from "./nlpParser";
 import {
@@ -541,24 +551,35 @@ matchesRouter.get("/api/trip-requests/:id/matches", async (req: Request, res: Re
   // is the owner (i.e. relevant to "me" as the one being picked up);
   // "my own" declaration isn't useful to show back to myself here.
   let ownerVehicleByUserId: Record<string, { vehicle_plate: string; vehicle_make_model: string | null }> = {};
-  if (caps.driverVehicleDeclarationsTable) {
-    const ownerIdsNeedingLookup = [
-      ...new Set(
-        results
-          .filter(
-            (r): r is { row: Record<string, any>; candidateReq: TripRequest; result: NonNullable<typeof r.result> } =>
-              Boolean(r.result?.should_match)
-          )
-          .map((r) => r.candidateReq.user_id)
-      ),
-    ];
-    if (ownerIdsNeedingLookup.length > 0) {
-      const { data: declarationRows } = await supabase
-        .from("driver_vehicle_declarations_public")
-        .select("user_id, vehicle_plate, vehicle_make_model")
-        .in("user_id", ownerIdsNeedingLookup);
-      for (const d of declarationRows ?? []) {
-        ownerVehicleByUserId[d.user_id] = { vehicle_plate: d.vehicle_plate, vehicle_make_model: d.vehicle_make_model };
+  const ownerIdsNeedingLookup = [
+    ...new Set(
+      results
+        .filter(
+          (r): r is { row: Record<string, any>; candidateReq: TripRequest; result: NonNullable<typeof r.result> } =>
+            Boolean(r.result?.should_match)
+        )
+        .map((r) => r.candidateReq.user_id)
+    ),
+  ];
+
+  if (caps.driverVehicleDeclarationsTable && ownerIdsNeedingLookup.length > 0) {
+    const { data: declarationRows } = await supabase
+      .from("driver_vehicle_declarations_public")
+      .select("user_id, vehicle_plate, vehicle_make_model")
+      .in("user_id", ownerIdsNeedingLookup);
+    for (const d of declarationRows ?? []) {
+      ownerVehicleByUserId[d.user_id] = { vehicle_plate: d.vehicle_plate, vehicle_make_model: d.vehicle_make_model };
+    }
+  }
+
+  for (const uid of ownerIdsNeedingLookup) {
+    if (!ownerVehicleByUserId[uid]) {
+      const stored = getStoredVehicleDeclaration(uid);
+      if (stored) {
+        ownerVehicleByUserId[uid] = {
+          vehicle_plate: stored.vehiclePlate,
+          vehicle_make_model: stored.vehicleMakeModel,
+        };
       }
     }
   }
@@ -1920,13 +1941,47 @@ matchesRouter.get(
     }
 
     const caps = await getDbCapabilities();
-    if (!caps.driverVehicleDeclarationsTable) return migrationPending(res, "Vehicle details");
+    if (!caps.driverVehicleDeclarationsTable) {
+      const stored = getStoredVehicleDeclaration(profileId) || getStoredVehicleDeclaration(authId);
+      if (!stored) return res.json({ declared: false });
+      return res.json({
+        declared: true,
+        vehicle_plate: stored.vehiclePlate,
+        vehicle_make_model: stored.vehicleMakeModel,
+        cnic_last4: stored.cnicLast4,
+        declared_at: stored.declaredAt,
+      });
+    }
 
     const { data, error } = await supabase.rpc("get_own_vehicle_declaration", { p_user_id: profileId });
-    if (error) return res.status(500).json({ error: "VEHICLE_DECLARATION_FETCH_FAILED", details: error.message });
+    if (error) {
+      const stored = getStoredVehicleDeclaration(profileId) || getStoredVehicleDeclaration(authId);
+      if (stored) {
+        return res.json({
+          declared: true,
+          vehicle_plate: stored.vehiclePlate,
+          vehicle_make_model: stored.vehicleMakeModel,
+          cnic_last4: stored.cnicLast4,
+          declared_at: stored.declaredAt,
+        });
+      }
+      return res.status(500).json({ error: "VEHICLE_DECLARATION_FETCH_FAILED", details: error.message });
+    }
 
     const row = (data ?? [])[0];
-    if (!row) return res.json({ declared: false });
+    if (!row) {
+      const stored = getStoredVehicleDeclaration(profileId) || getStoredVehicleDeclaration(authId);
+      if (stored) {
+        return res.json({
+          declared: true,
+          vehicle_plate: stored.vehiclePlate,
+          vehicle_make_model: stored.vehicleMakeModel,
+          cnic_last4: stored.cnicLast4,
+          declared_at: stored.declaredAt,
+        });
+      }
+      return res.json({ declared: false });
+    }
     return res.json({
       declared: true,
       vehicle_plate: row.vehicle_plate,
@@ -1955,9 +2010,6 @@ matchesRouter.post(
       profileId = linked.id;
     }
 
-    const caps = await getDbCapabilities();
-    if (!caps.driverVehicleDeclarationsTable) return migrationPending(res, "Vehicle details");
-
     const { cnic_number, vehicle_plate, vehicle_make_model } = req.body;
     const cnicFromBody = typeof cnic_number === "string" ? cnic_number : "";
     const cnic =
@@ -1975,23 +2027,79 @@ matchesRouter.post(
       return res.status(400).json({ error: "INVALID_VEHICLE_PLATE" });
     }
 
+    const cleanPlate = normalizeVehiclePlate(vehicle_plate);
+    const cleanModel =
+      typeof vehicle_make_model === "string" && vehicle_make_model.trim() ? vehicle_make_model.trim() : null;
+    const cnicLast4 = maskCnicToLast4(cnic);
+    const now = new Date().toISOString();
+
+    const caps = await getDbCapabilities();
+    if (!caps.driverVehicleDeclarationsTable) {
+      upsertStoredVehicleDeclaration({
+        userId: profileId,
+        vehiclePlate: cleanPlate,
+        vehicleMakeModel: cleanModel,
+        cnicLast4,
+        declaredAt: now,
+      });
+      if (authId !== profileId) {
+        upsertStoredVehicleDeclaration({
+          userId: authId,
+          vehiclePlate: cleanPlate,
+          vehicleMakeModel: cleanModel,
+          cnicLast4,
+          declaredAt: now,
+        });
+      }
+      return res.json({
+        success: true,
+        vehicle_plate: cleanPlate,
+        vehicle_make_model: cleanModel,
+        cnic_last4: cnicLast4,
+        declared_at: now,
+      });
+    }
+
     const { data, error } = await supabase.rpc("upsert_vehicle_declaration", {
       p_user_id: profileId,
       p_cnic_number: normalizeCnic(cnic),
-      p_vehicle_plate: normalizeVehiclePlate(vehicle_plate),
-      p_vehicle_make_model:
-        typeof vehicle_make_model === "string" && vehicle_make_model.trim() ? vehicle_make_model.trim() : null,
+      p_vehicle_plate: cleanPlate,
+      p_vehicle_make_model: cleanModel,
     });
 
-    if (error) return res.status(500).json({ error: "VEHICLE_DECLARATION_SAVE_FAILED", details: error.message });
+    if (error) {
+      upsertStoredVehicleDeclaration({
+        userId: profileId,
+        vehiclePlate: cleanPlate,
+        vehicleMakeModel: cleanModel,
+        cnicLast4,
+        declaredAt: now,
+      });
+      if (authId !== profileId) {
+        upsertStoredVehicleDeclaration({
+          userId: authId,
+          vehiclePlate: cleanPlate,
+          vehicleMakeModel: cleanModel,
+          cnicLast4,
+          declaredAt: now,
+        });
+      }
+      return res.json({
+        success: true,
+        vehicle_plate: cleanPlate,
+        vehicle_make_model: cleanModel,
+        cnic_last4: cnicLast4,
+        declared_at: now,
+      });
+    }
 
     const row = (data ?? [])[0];
     return res.json({
       success: true,
-      vehicle_plate: row?.vehicle_plate,
-      vehicle_make_model: row?.vehicle_make_model,
-      cnic_last4: row?.cnic_last4,
-      declared_at: row?.declared_at,
+      vehicle_plate: row?.vehicle_plate ?? cleanPlate,
+      vehicle_make_model: row?.vehicle_make_model ?? cleanModel,
+      cnic_last4: row?.cnic_last4 ?? cnicLast4,
+      declared_at: row?.declared_at ?? now,
     });
   }
 );
