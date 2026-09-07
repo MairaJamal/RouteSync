@@ -9,26 +9,20 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Generous default: 200 requests / 15 min per IP. Tighter limits on
-// specific high-risk endpoints (SOS logging, verification) live inline
-// below so a burst on one endpoint can't be masked by the global window.
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+// Generous default: 2000 requests / 15 min per IP in dev so continuous polling
+// (notifications, consents, chats) doesn't prematurely throttle localhost.
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
-    limit: 200,
+    limit: process.env.NODE_ENV === "production" ? 200 : 2000,
     standardHeaders: true,
     legacyHeaders: false,
   })
 );
-
-// Note: apiHandler.ts validates SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY at
-// import time (throwing before this file's own code runs), so a missing
-// .env fails fast with a clear message rather than a confusing runtime 500
-// on the first request.
-
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
-});
 
 app.use(matchesRouter);
 
