@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+dist-web/
+**/dist/
+**/dist-web/
+
+# Environment files — never commit real credentials
+.env
+.env.*
+*.env
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Editor / OS cruft
+.DS_Store
+*.log
+.vscode/
+.idea/
+
+# Local persistence and temporary data
+routemate-person-b/.data/
+**/.data/
+**/.temp/

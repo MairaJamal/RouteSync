@@ -1,0 +1,114 @@
+/* RouteSync design tokens — Person B's Day 5 styling pass.
+   Import once at the app root, before any component styles.
+
+   Design plan (see README.md for the full rationale):
+   - ink / paper: charcoal-on-sage-mist, not the generic cream+serif look
+   - signal: taxi-cab yellow, the one bold accent for primary actions
+   - route-blue / route-green / route-purple: the exact leg colors the
+     backend (matchPipeline.ts) already assigns to lead / shared / dropoff
+     legs — the UI and the data model share one palette, not two
+   - font-display: monospace, used ONLY for sector-code badges (F-10, G-9)
+     and section headers — a literal echo of Islamabad's real alphanumeric
+     grid, not a generic "techy" choice
+   - font-body: humanist sans for everything people actually read on a form
+*/
+
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap");
+
+:root {
+  --rm-ink: #1b1f27;
+  --rm-ink-soft: #4a5160;
+  --rm-paper: #eef1ec;
+  --rm-paper-raised: #ffffff;
+  --rm-signal: #f2b705;
+  --rm-signal-ink: #3a2c00;
+  --rm-route-blue: #2f6fed;
+  --rm-route-green: #3d8361;
+  --rm-route-purple: #7c5cbf;
+  --rm-danger: #c1432e;
+  --rm-border: #d8ddd4;
+
+  /* Day 7: Safety & Trust palette.
+     --rm-alert is the SOS red — deliberately distinct from --rm-danger so
+     the emergency button reads as "act now", not "destructive action". */
+  --rm-alert: #d92d20;
+  --rm-alert-tint: #fdecea;
+  --rm-verified: #12635c;
+  --rm-verified-tint: #d8ece9;
+  --rm-star: #d99a06;
+  --rm-women-only: #a4457f;
+  --rm-women-only-tint: #f7e6f1;
+
+  --rm-font-display: "IBM Plex Mono", ui-monospace, monospace;
+  --rm-font-body: "IBM Plex Sans", system-ui, sans-serif;
+
+  --rm-radius: 10px;
+  --rm-focus-ring: 0 0 0 3px rgba(242, 183, 5, 0.45);
+}
+
+/* Accessibility Focus Floor */
+*:focus-visible {
+  outline: 2px solid var(--rm-signal);
+  outline-offset: 2px;
+  box-shadow: var(--rm-focus-ring);
+}
+
+/* Motion Accessibility */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Skeleton Loading Shimmer */
+@keyframes rm-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.rm-skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(216, 221, 212, 0.4) 25%,
+    rgba(255, 255, 255, 0.7) 50%,
+    rgba(216, 221, 212, 0.4) 75%
+  );
+  background-size: 200% 100%;
+  animation: rm-shimmer 1.5s infinite ease-in-out;
+  border-radius: 6px;
+}
+
+[data-theme="dark"] {
+  --rm-ink: #f1f4f8;
+  --rm-ink-soft: #9faec0;
+  --rm-paper: #0f141c;
+  --rm-paper-raised: #18202c;
+  --rm-border: #2a3649;
+  --rm-signal: #f2b705;
+  --rm-signal-ink: #18202c;
+  --rm-alert-tint: #381515;
+  --rm-verified: #2dd4bf;
+  --rm-verified-tint: #0f2e2b;
+  --rm-women-only-tint: #3d142d;
+}
+
+[data-theme="dark"] .rm-skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(42, 54, 73, 0.5) 25%,
+    rgba(64, 82, 110, 0.8) 50%,
+    rgba(42, 54, 73, 0.5) 75%
+  );
+  background-size: 200% 100%;
+}
+
+

@@ -1,0 +1,52 @@
+{
+  "name": "routemate-person-b",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev:all": "concurrently \"npm run dev:server\" \"npm run dev\"",
+    "dev": "vite",
+    "dev:server": "tsx watch src/server.ts",
+    "server": "tsx src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsc",
+    "build:web": "vite build",
+    "test": "node dist/test.js && node dist/test_day4.js && node dist/test_pooling.js && node dist/test_consent.js && node dist/test_consent_expiry.js && node dist/test_notifications.js && node dist/test_day7.js && node dist/test_verification.js && node dist/test_nlpParser.js && node dist/test_vehicleMatch.js && node dist/test_ride_hailing.js && node dist/test_vehicleDeclaration.js && node dist/test_mockCandidates.js",
+    "test:mock-candidates": "tsx src/test_mockCandidates.ts",
+    "test:pooling": "tsx src/test_pooling.ts",
+    "test:consent": "tsx src/test_consent.ts",
+    "test:consent-expiry": "tsx src/test_consent_expiry.ts",
+    "test:notifications": "tsx src/test_notifications.ts",
+    "test:ride-hailing": "tsx src/test_ride_hailing.ts",
+    "test:vehicle-declaration": "tsx src/test_vehicleDeclaration.ts",
+    "day3": "tsx src/testRun.ts",
+    "db:reset": "psql -d routemate -f schema.sql -f seed.sql -f seed_day4.sql -f test_vectors_day4.sql"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
+    "@types/express": "^5.0.6",
+    "@types/leaflet": "^1.9.22",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "leaflet": "^1.9.4",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@vitejs/plugin-react": "^6.1.0",
+    "concurrently": "^10.0.5",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  }
+}
