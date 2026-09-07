@@ -1,4 +1,4 @@
-# RouteSync — Islamabad Carpool & Ride-Sharing Platform
+# RouteSync — Carpool & Ride-Sharing Platform
 
 **RouteSync** is an intelligent carpooling and ride-matching platform built for university students and young professionals commuting across Islamabad and Rawalpindi. It enables commuters to discover overlapping travel corridors, share rides securely, split fares transparently, and reduce carbon emissions.
 
