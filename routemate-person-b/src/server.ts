@@ -26,11 +26,14 @@ app.use(
 
 app.use(matchesRouter);
 
-const port = Number(process.env.PORT) || 3001;
-
-app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`[server] RouteSync API listening on http://localhost:${port}`);
-});
+// Vercel imports this module as a serverless function. Keep the listener for
+// local development, but never start a long-lived socket in that environment.
+if (!process.env.VERCEL) {
+  const port = Number(process.env.PORT) || 3001;
+  app.listen(port, () => {
+    // eslint-disable-next-line no-console
+    console.log(`[server] RouteSync API listening on http://localhost:${port}`);
+  });
+}
 
 export default app;

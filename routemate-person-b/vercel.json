@@ -1,3 +1,11 @@
 {
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+  "buildCommand": "npm run build:web",
+  "outputDirectory": "dist-web",
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "functions": {
+    "api/index.ts": { "maxDuration": 60 }
+  }
 }
