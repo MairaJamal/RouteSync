@@ -9,8 +9,10 @@ type Mode = "signin" | "signup";
 
 export default function AuthScreen({
   onSuccess,
+  onPreview,
 }: {
   onSuccess: (session: AuthUserSession) => void;
+  onPreview?: () => void;
 }) {
   const [mode, setMode] = useState<Mode>("signin");
   const [email, setEmail] = useState("");
@@ -512,6 +514,28 @@ export default function AuthScreen({
                   : "CREATE ACCOUNT"}
             </button>
           </form>
+
+          {onPreview && (
+            <button
+              type="button"
+              onClick={onPreview}
+              style={{
+                width: "100%",
+                marginTop: "10px",
+                padding: "10px 12px",
+                borderRadius: "8px",
+                border: "1px solid var(--rm-border)",
+                background: "transparent",
+                color: "var(--rm-ink)",
+                fontFamily: "var(--rm-font-display)",
+                fontSize: "12px",
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              PREVIEW DASHBOARD (DEMO)
+            </button>
+          )}
         </div>
       </div>
     </div>
