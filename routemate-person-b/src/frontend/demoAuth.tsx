@@ -28,9 +28,7 @@ export interface SignupVehicle {
   makeModel: string;
 }
 
-/** Set only after the user completes Sign In / Sign Up in AuthScreen.
- *  Prevents the old silent demo JWT (left in localStorage) from skipping
- *  the login gate on first open. */
+/** Marks that a real AuthScreen session was accepted by the app. */
 const EXPLICIT_AUTH_KEY = "rm_explicit_auth";
 
 function markExplicitAuth() {
@@ -49,14 +47,6 @@ function clearExplicitAuth() {
   }
 }
 
-function hasExplicitAuth(): boolean {
-  try {
-    return localStorage.getItem(EXPLICIT_AUTH_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
 export interface AuthUserSession {
   userId: string;
   displayName: string;
@@ -64,6 +54,16 @@ export interface AuthUserSession {
   isVerified: boolean;
   verifiedDomain: string | null;
   preferredRole: UserRole;
+}
+
+function metadataGender(value: unknown): Gender {
+  return value === "male" || value === "non_binary" ? value : "female";
+}
+
+function metadataName(user: { email?: string | null; user_metadata?: Record<string, unknown> }): string {
+  const name = user.user_metadata?.display_name;
+  if (typeof name === "string" && name.trim()) return name.trim();
+  return user.email?.split("@")[0] || "RouteSync User";
 }
 
 let client: ReturnType<typeof createClient> | null = null;
@@ -92,21 +92,30 @@ async function loadProfileForAuthUser(
   preferredRole: UserRole = "LOOKING"
 ): Promise<AuthUserSession> {
   const supabase = getClient();
-  const { data: byAuth } = await supabase
-    .from("users")
-    .select("id, display_name, gender, is_verified, verified_domain")
-    .eq("auth_user_id", authUserId)
-    .maybeSingle();
+  async function findProfile(filterColumn: "auth_user_id" | "id", filterValue: string) {
+    const full = await supabase
+      .from("users")
+      .select("id, display_name, gender, is_verified, verified_domain")
+      .eq(filterColumn, filterValue)
+      .maybeSingle();
+    if (!full.error) return full.data;
+
+    // Older hosted databases may not have the verified-badge migration yet.
+    // Login should still work; missing optional columns simply mean unverified.
+    const base = await supabase
+      .from("users")
+      .select("id, display_name, gender")
+      .eq(filterColumn, filterValue)
+      .maybeSingle();
+    if (base.error) throw new Error(`Could not load your profile: ${base.error.message}`);
+    return base.data;
+  }
+
+  const byAuth = await findProfile("auth_user_id", authUserId);
 
   const row =
     byAuth ??
-    (
-      await supabase
-        .from("users")
-        .select("id, display_name, gender, is_verified, verified_domain")
-        .eq("id", authUserId)
-        .maybeSingle()
-    ).data;
+    (await findProfile("id", authUserId));
 
   if (!row) {
     throw new Error(
@@ -149,18 +158,24 @@ async function ensureProfileRow(opts: {
   }
 }
 
-/** Restore an existing browser session (e.g. page refresh). Returns null if signed out.
- *  Sessions that were never created via AuthScreen (legacy silent demo login) are
- *  cleared so the login / signup screen always shows on first open. */
+async function ensureProfileRowIfMissing(opts: {
+  authUserId: string;
+  displayName: string;
+  gender: Gender;
+}): Promise<void> {
+  const supabase = getClient();
+  const { data, error } = await supabase
+    .from("users")
+    .select("id")
+    .eq("auth_user_id", opts.authUserId)
+    .maybeSingle();
+  if (error) throw new Error(`Could not check your profile: ${error.message}`);
+  if (!data) await ensureProfileRow(opts);
+}
+
+/** Restore an existing browser session (including the session from an email-confirmation link). */
 export async function restoreSession(): Promise<AuthUserSession | null> {
   const supabase = getClient();
-
-  // No explicit login yet → drop any leftover demo/supabase session and show AuthScreen.
-  if (!hasExplicitAuth()) {
-    setCachedToken(null);
-    await supabase.auth.signOut().catch(() => undefined);
-    return null;
-  }
 
   const { data, error } = await supabase.auth.getSession();
   if (error || !data.session?.user) {
@@ -169,13 +184,20 @@ export async function restoreSession(): Promise<AuthUserSession | null> {
     return null;
   }
   setCachedToken(data.session.access_token);
-  const meta = data.session.user.user_metadata ?? {};
+  const user = data.session.user;
+  const meta = user.user_metadata ?? {};
   const preferredRole: UserRole = meta.preferred_role === "OFFERING" ? "OFFERING" : "LOOKING";
   try {
+    await ensureProfileRowIfMissing({
+      authUserId: user.id,
+      displayName: metadataName(user),
+      gender: metadataGender(meta.gender),
+    });
+    markExplicitAuth();
     return await loadProfileForAuthUser(
-      data.session.user.id,
-      typeof meta.display_name === "string" ? meta.display_name : undefined,
-      undefined,
+      user.id,
+      metadataName(user),
+      metadataGender(meta.gender),
       preferredRole
     );
   } catch {
@@ -191,16 +213,29 @@ export async function signIn(email: string, password: string): Promise<AuthUserS
   const supabase = getClient();
   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
   if (error || !data.session?.user) {
+    const message = error?.message?.toLowerCase() ?? "";
+    if (message.includes("email not confirmed")) {
+      throw new Error("Email not confirmed. Check Inbox/Spam, then use Resend confirmation email.");
+    }
+    if (message.includes("invalid login credentials")) {
+      throw new Error("Incorrect email or password. Use the exact signup email and password.");
+    }
     throw new Error(error?.message ?? "Sign-in failed — check your email and password.");
   }
   setCachedToken(data.session.access_token);
   markExplicitAuth();
-  const meta = data.session.user.user_metadata ?? {};
+  const user = data.session.user;
+  const meta = user.user_metadata ?? {};
   const preferredRole: UserRole = meta.preferred_role === "OFFERING" ? "OFFERING" : "LOOKING";
+  await ensureProfileRowIfMissing({
+    authUserId: user.id,
+    displayName: metadataName(user),
+    gender: metadataGender(meta.gender),
+  });
   return loadProfileForAuthUser(
-    data.session.user.id,
-    typeof meta.display_name === "string" ? meta.display_name : undefined,
-    undefined,
+    user.id,
+    metadataName(user),
+    metadataGender(meta.gender),
     preferredRole
   );
 }
@@ -276,39 +311,19 @@ export async function signUp(opts: {
     },
   });
   if (error) {
+    const message = error.message.toLowerCase();
+    if (message.includes("already registered") || message.includes("already been registered")) {
+      throw new Error("This email is already registered. Switch to Sign In and confirm the email first.");
+    }
+    if (message.includes("rate limit") || message.includes("email rate limit")) {
+      throw new Error("Supabase email limit reached. Wait a few minutes before requesting another confirmation email.");
+    }
     throw new Error(error.message);
   }
   if (!data.session?.user) {
-    // Email confirmation may be required — try immediate password sign-in;
-    // if that also fails, ask the user to confirm email.
-    const retry = await supabase.auth.signInWithPassword({
-      email: opts.email,
-      password: opts.password,
-    });
-    if (retry.error || !retry.data.session?.user) {
-      // Keep email verification enabled, but automatically resend the link so
-      // the user does not have to discover a separate recovery action.
-      await supabase.auth.resend({ type: "signup", email: opts.email }).catch(() => undefined);
-      throw new Error(
-        "Account created — confirmation email resent. Check Inbox, Spam, and Promotions, then sign in."
-      );
-    }
-    setCachedToken(retry.data.session.access_token);
-    markExplicitAuth();
-    await ensureProfileRow({
-      authUserId: retry.data.session.user.id,
-      displayName: opts.displayName.trim(),
-      gender: opts.gender,
-      phone: opts.phone,
-    });
-    const session = await loadProfileForAuthUser(
-      retry.data.session.user.id,
-      opts.displayName.trim(),
-      opts.gender,
-      opts.preferredRole
+    throw new Error(
+      "Account created. Confirm the email Supabase sent you, then switch to Sign In. If it does not arrive, use Resend confirmation email once."
     );
-    await saveSignupExtras(session.userId, opts.identity, opts.vehicle);
-    return session;
   }
 
   setCachedToken(data.session.access_token);
