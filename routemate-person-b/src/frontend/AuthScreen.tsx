@@ -2,7 +2,13 @@
 import { useState, FormEvent, CSSProperties } from "react";
 import { Gender } from "../types";
 import { UserRole } from "./LocationSearchForm";
-import { signIn, signUp, AuthUserSession, IdDocumentType } from "./demoAuth";
+import {
+  signIn,
+  signUp,
+  resendSignupConfirmation,
+  AuthUserSession,
+  IdDocumentType,
+} from "./demoAuth";
 import { formatPakistaniCnic, isValidPakistaniCnic, isValidVehiclePlate } from "../vehicleDeclaration";
 
 type Mode = "signin" | "signup";
@@ -29,10 +35,12 @@ export default function AuthScreen({
   const [vehicleMakeModel, setVehicleMakeModel] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmationSent, setConfirmationSent] = useState(false);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    setConfirmationSent(false);
 
     if (mode === "signup") {
       if (!isValidPakistaniCnic(cnic)) {
@@ -88,6 +96,25 @@ export default function AuthScreen({
       onSuccess(session);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const needsConfirmation = !!error && /confirm|not confirmed|verification/i.test(error);
+
+  async function handleResendConfirmation() {
+    if (!email.trim()) {
+      setError("Enter your email first, then resend the confirmation email.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await resendSignupConfirmation(email);
+      setConfirmationSent(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not resend the confirmation email.");
     } finally {
       setBusy(false);
     }
@@ -485,6 +512,30 @@ export default function AuthScreen({
                 }}
               >
                 {error}
+              </div>
+            )}
+
+            {needsConfirmation && (
+              <button
+                type="button"
+                onClick={handleResendConfirmation}
+                disabled={busy}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: "8px",
+                  border: "1px solid var(--rm-border)",
+                  background: "transparent",
+                  color: "var(--rm-ink)",
+                  cursor: busy ? "wait" : "pointer",
+                }}
+              >
+                Resend confirmation email
+              </button>
+            )}
+
+            {confirmationSent && (
+              <div style={{ fontSize: "13px", color: "var(--rm-ink-soft)" }}>
+                Confirmation email resent. Check Inbox, Spam, and Promotions.
               </div>
             )}
 

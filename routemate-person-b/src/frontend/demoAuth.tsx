@@ -326,6 +326,13 @@ export async function signUp(opts: {
   return session;
 }
 
+/** Re-send verification without weakening Supabase email verification. */
+export async function resendSignupConfirmation(email: string): Promise<void> {
+  const supabase = getClient();
+  const { error } = await supabase.auth.resend({ type: "signup", email: email.trim() });
+  if (error) throw new Error(error.message);
+}
+
 export async function signOut(): Promise<void> {
   setCachedToken(null);
   clearExplicitAuth();
