@@ -5,6 +5,7 @@
  * accidental exposure. */
 import {
   isValidPakistaniCnic,
+  formatPakistaniCnic,
   normalizeCnic,
   maskCnicToLast4,
   isValidVehiclePlate,
@@ -32,6 +33,10 @@ check("CNIC with letters rejected", isValidPakistaniCnic("4210A-1234567-1") === 
 check("CNIC too short rejected", isValidPakistaniCnic("1234-123456-1") === false);
 check("empty string rejected", isValidPakistaniCnic("") === false);
 check("non-string input rejected without throwing", isValidPakistaniCnic(null as any) === false);
+
+check("CNIC formatter adds standard dashes", formatPakistaniCnic("4210112345671") === "42101-1234567-1");
+check("CNIC formatter strips letters and limits to 13 digits", formatPakistaniCnic("42101abc123456799") === "42101-1234567-9");
+check("CNIC formatter preserves already formatted input", formatPakistaniCnic("42101-1234567-1") === "42101-1234567-1");
 
 check("normalizeCnic trims whitespace only, doesn't alter digits/dashes", normalizeCnic("  42101-1234567-1  ") === "42101-1234567-1");
 

@@ -3,7 +3,7 @@ import { useState, FormEvent, CSSProperties } from "react";
 import { Gender } from "../types";
 import { UserRole } from "./LocationSearchForm";
 import { signIn, signUp, AuthUserSession, IdDocumentType } from "./demoAuth";
-import { isValidPakistaniCnic, isValidVehiclePlate } from "../vehicleDeclaration";
+import { formatPakistaniCnic, isValidPakistaniCnic, isValidVehiclePlate } from "../vehicleDeclaration";
 
 type Mode = "signin" | "signup";
 
@@ -328,10 +328,11 @@ export default function AuthScreen({
                     <input
                       style={inputStyle}
                       value={cnic}
-                      onChange={(e) => setCnic(e.target.value)}
+                      onChange={(e) => setCnic(formatPakistaniCnic(e.target.value))}
                       placeholder="12345-1234567-1"
                       required
                       inputMode="numeric"
+                      maxLength={15}
                       autoComplete="off"
                     />
                   </div>

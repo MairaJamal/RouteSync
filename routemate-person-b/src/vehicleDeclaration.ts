@@ -21,6 +21,16 @@
 /** Standard Pakistani CNIC format: 5 digits - 7 digits - 1 digit. */
 const CNIC_REGEX = /^\d{5}-\d{7}-\d{1}$/;
 
+/** Formats raw CNIC digits as the standard 5-7-1 Pakistani CNIC pattern. */
+export function formatPakistaniCnic(input: string): string {
+  const digitsOnly = input.replace(/\D/g, "").slice(0, 13);
+  if (digitsOnly.length <= 5) return digitsOnly;
+  if (digitsOnly.length <= 12) {
+    return `${digitsOnly.slice(0, 5)}-${digitsOnly.slice(5)}`;
+  }
+  return `${digitsOnly.slice(0, 5)}-${digitsOnly.slice(5, 12)}-${digitsOnly.slice(12)}`;
+}
+
 export function normalizeCnic(input: string): string {
   return input.trim();
 }
