@@ -321,6 +321,12 @@ export async function signUp(opts: {
     throw new Error(error.message);
   }
   if (!data.session?.user) {
+    // Supabase deliberately obfuscates duplicate-email errors. It returns a
+    // user with no identities instead of an explicit "already registered"
+    // error, which must not be presented as a new confirmation email.
+    if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+      throw new Error("This email is already registered. Switch to Sign In instead.");
+    }
     throw new Error(
       "Account created. Confirm the email Supabase sent you, then switch to Sign In. If it does not arrive, use Resend confirmation email once."
     );
