@@ -286,8 +286,11 @@ export async function signUp(opts: {
       password: opts.password,
     });
     if (retry.error || !retry.data.session?.user) {
+      // Keep email verification enabled, but automatically resend the link so
+      // the user does not have to discover a separate recovery action.
+      await supabase.auth.resend({ type: "signup", email: opts.email }).catch(() => undefined);
       throw new Error(
-        "Account created — confirm the email Supabase sent you, then sign in."
+        "Account created — confirmation email resent. Check Inbox, Spam, and Promotions, then sign in."
       );
     }
     setCachedToken(retry.data.session.access_token);
