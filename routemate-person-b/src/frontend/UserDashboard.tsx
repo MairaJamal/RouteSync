@@ -38,7 +38,6 @@ interface DashboardPayload {
 interface UserDashboardProps {
   userId: string;
   fallbackProfile?: DashboardProfile | null;
-  demoPreview?: boolean;
   onClose: () => void;
 }
 
@@ -106,7 +105,7 @@ function StatCard({
   );
 }
 
-export default function UserDashboard({ userId, fallbackProfile, demoPreview = false, onClose }: UserDashboardProps) {
+export default function UserDashboard({ userId, fallbackProfile, onClose }: UserDashboardProps) {
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -115,45 +114,6 @@ export default function UserDashboard({ userId, fallbackProfile, demoPreview = f
     let cancelled = false;
     setLoading(true);
     setError(null);
-
-    if (demoPreview) {
-      setData({
-        profile: fallbackProfile ?? {
-          display_name: "RouteSync Demo",
-          gender: "female",
-          is_verified: true,
-          verified_domain: "demo.routesync",
-        },
-        rating: { avg_stars: 4.8, rating_count: 12 },
-        stats: { ride_count: 8, total_co2_saved_kg: 21.6, estimated_money_saved_pkr: 3840 },
-        rides: [
-          {
-            ride_id: "preview-1",
-            role: "passenger",
-            status: "completed",
-            origin_label: "F-8 Markaz",
-            destination_label: "NUST H-12",
-            departure_time: new Date(Date.now() - 86400000).toISOString(),
-            completed_at: new Date(Date.now() - 82800000).toISOString(),
-            co2_saved_kg: 3.2,
-            estimated_fare_saved_pkr: 520,
-          },
-          {
-            ride_id: "preview-2",
-            role: "driver",
-            status: "completed",
-            origin_label: "G-11",
-            destination_label: "Blue Area",
-            departure_time: new Date(Date.now() - 172800000).toISOString(),
-            completed_at: new Date(Date.now() - 169200000).toISOString(),
-            co2_saved_kg: 4.6,
-            estimated_fare_saved_pkr: 680,
-          },
-        ],
-      });
-      setLoading(false);
-      return;
-    }
 
     (async () => {
       try {
@@ -184,7 +144,7 @@ export default function UserDashboard({ userId, fallbackProfile, demoPreview = f
     return () => {
       cancelled = true;
     };
-  }, [userId, fallbackProfile, demoPreview]);
+  }, [userId, fallbackProfile]);
 
   const profile = data?.profile ?? fallbackProfile;
   const rating = data?.rating ?? { avg_stars: 0, rating_count: 0 };

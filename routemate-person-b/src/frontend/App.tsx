@@ -100,7 +100,6 @@ export default function App() {
   const [searchCriteria, setSearchCriteria] = useState<TripSearchValue | null>(null);
   const [activeChatMatch, setActiveChatMatch] = useState<ConfirmedMatchInfo | null>(null);
   const [dashboardOpen, setDashboardOpen] = useState(false);
-  const [demoPreviewOpen, setDemoPreviewOpen] = useState(false);
   const [demoNotice, setDemoNotice] = useState<string | null>(null);
   const [soloEstimates, setSoloEstimates] = useState<SoloFareEstimateView[]>([]);
   const [completedRideIds, setCompletedRideIds] = useState<string[]>([]);
@@ -270,24 +269,7 @@ export default function App() {
   }
 
   if (!authSession) {
-    return (
-      <>
-        <AuthScreen onSuccess={setAuthSession} onPreview={() => setDemoPreviewOpen(true)} />
-        {demoPreviewOpen && (
-          <UserDashboard
-            userId="demo-preview"
-            demoPreview
-            fallbackProfile={{
-              display_name: "RouteSync Demo",
-              gender: "female",
-              is_verified: true,
-              verified_domain: "demo.routesync",
-            }}
-            onClose={() => setDemoPreviewOpen(false)}
-          />
-        )}
-      </>
-    );
+    return <AuthScreen onSuccess={setAuthSession} />;
   }
 
   async function handleSearch(val: TripSearchValue) {
