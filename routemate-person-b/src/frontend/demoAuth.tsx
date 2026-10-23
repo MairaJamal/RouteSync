@@ -366,7 +366,6 @@ export async function signOut(): Promise<void> {
 
 /** Returns a valid access token from the active session. */
 export async function getAuthToken(): Promise<string> {
-  if (cachedToken) return cachedToken;
   if (inFlight) return inFlight;
 
   inFlight = (async () => {
@@ -386,6 +385,22 @@ export async function getAuthToken(): Promise<string> {
   }
 }
 
+/** Force-refresh the refresh-token session after the API rejects a token. */
+async function refreshAuthToken(): Promise<string | null> {
+  try {
+    const { data, error } = await getClient().auth.refreshSession();
+    if (error || !data.session?.access_token) {
+      cachedToken = null;
+      return null;
+    }
+    cachedToken = data.session.access_token;
+    return cachedToken;
+  } catch {
+    cachedToken = null;
+    return null;
+  }
+}
+
 /** Convenience wrapper: fetch() with the signed-in user's Authorization header
  *  already attached. Falls through to a normal, unauthenticated fetch
  *  with a console warning if sign-in fails, rather than hard-crashing the
@@ -401,7 +416,16 @@ export async function authedFetch(url: string, init: RequestInit = {}): Promise<
       err instanceof Error ? err.message : err
     );
   }
-  const headers = new Headers(init.headers ?? {});
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  return fetch(url, { ...init, headers });
+  const requestWithToken = (accessToken: string | null) => {
+    const headers = new Headers(init.headers ?? {});
+    if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+    return fetch(url, { ...init, headers });
+  };
+
+  let response = await requestWithToken(token);
+  if (response.status === 401) {
+    const refreshed = await refreshAuthToken();
+    if (refreshed) response = await requestWithToken(refreshed);
+  }
+  return response;
 }
