@@ -103,6 +103,7 @@ export default function App() {
   const [demoPreviewOpen, setDemoPreviewOpen] = useState(false);
   const [demoNotice, setDemoNotice] = useState<string | null>(null);
   const [soloEstimates, setSoloEstimates] = useState<SoloFareEstimateView[]>([]);
+  const [completedRideIds, setCompletedRideIds] = useState<string[]>([]);
 
   // Day 7 state
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
@@ -173,6 +174,7 @@ export default function App() {
   useEffect(() => {
     if (!currentUserId) return;
     let cancelled = false;
+    const completedIds = new Set(completedRideIds);
 
     async function pullChats() {
       try {
@@ -190,10 +192,17 @@ export default function App() {
         }>;
         if (!inbound.length || cancelled) return;
 
+        // A completed ride may still have a persisted chat thread. It belongs
+        // in ride history, not back in the active dashboard after polling.
+        const activeInbound = inbound.filter(
+          (chat) => !chat.ride_id || !completedIds.has(chat.ride_id)
+        );
+        if (!activeInbound.length || cancelled) return;
+
         setConfirmedMatches((prev) => {
           const existingChatIds = new Set(prev.filter((m) => m.chatId).map((m) => m.chatId!));
           let next = prev.map((m) => ({ ...m }));
-          for (const c of inbound) {
+          for (const c of activeInbound) {
             if (existingChatIds.has(c.chat_id)) continue;
             const idx = next.findIndex(
               (m) => m.candidateUserId === c.peer_user_id && m.status === "confirmed"
@@ -239,7 +248,7 @@ export default function App() {
       cancelled = true;
       clearInterval(t);
     };
-  }, [currentUserId]);
+  }, [currentUserId, completedRideIds]);
 
   if (authChecking) {
     return (
@@ -623,6 +632,9 @@ export default function App() {
         return;
       }
       const payload = await res.json();
+      setCompletedRideIds((prev) =>
+        prev.includes(matchItem.rideId!) ? prev : [...prev, matchItem.rideId!]
+      );
       const riders: PendingRating[] = (payload.ratable_riders ?? []).map((r: any) => ({
         rideId: payload.ride_id,
         userId: r.user_id,
@@ -826,6 +838,7 @@ export default function App() {
             onSubmit={handleSearch}
             currentUserGender={userProfile?.gender}
             initialUserRole={preferredRole}
+            userId={currentUserId ?? undefined}
           />
         </section>
 

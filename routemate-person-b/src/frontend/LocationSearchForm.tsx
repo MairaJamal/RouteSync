@@ -9,6 +9,8 @@ import { LocationPoint, Gender, GenderPreference } from "../types";
 import InteractiveMapPicker from "./InteractiveMapPicker";
 import CoPassengerPicker, { CO_PASSENGER_OPTIONS } from "./CoPassengerPicker";
 import { isValidVehiclePlate } from "../vehicleDeclaration";
+import { API_URL } from "./apiBase";
+import { authedFetch } from "./demoAuth";
 
 
 interface FieldState {
@@ -306,12 +308,15 @@ export default function LocationSearchForm({
   defaultMaxCoPassengers = 3,
   currentUserGender,
   initialUserRole = "LOOKING",
+  userId,
 }: {
   onSubmit: (value: TripSearchValue) => void;
   defaultMaxCoPassengers?: number;
   currentUserGender?: Gender;
   /** Prefill from signup (driver vs passenger). */
   initialUserRole?: UserRole;
+  /** Signed-in profile used to restore the saved driver vehicle declaration. */
+  userId?: string;
 }) {
   const [pickup, setPickup] = useState<FieldState>(emptyField);
   const [dropoff, setDropoff] = useState<FieldState>(emptyField);
@@ -334,8 +339,44 @@ export default function LocationSearchForm({
   const [seatsAvailable, setSeatsAvailable] = useState<number>(2);
   const [vehiclePlate, setVehiclePlate] = useState("");
   const [vehicleMakeModel, setVehicleMakeModel] = useState("");
+  const [savedVehicleDetails, setSavedVehicleDetails] = useState<{
+    plate: string;
+    makeModel: string;
+  } | null>(null);
+  const [editingVehicleDetails, setEditingVehicleDetails] = useState(false);
+  const [vehicleDetailsLoading, setVehicleDetailsLoading] = useState(false);
   const [showMap, setShowMap] = useState<boolean>(false);
   const [mapTargetMode, setMapTargetMode] = useState<"pickup" | "dropoff">("pickup");
+
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    setVehicleDetailsLoading(true);
+    authedFetch(`${API_URL}/api/users/${userId}/vehicle-declaration`)
+      .then(async (res) => {
+        if (!res.ok) return;
+        const payload = await res.json().catch(() => null);
+        if (!cancelled && payload?.declared && payload.vehicle_plate) {
+          const details = {
+            plate: String(payload.vehicle_plate),
+            makeModel: String(payload.vehicle_make_model ?? ""),
+          };
+          setSavedVehicleDetails(details);
+          setVehiclePlate(details.plate);
+          setVehicleMakeModel(details.makeModel);
+          setEditingVehicleDetails(false);
+        }
+      })
+      .catch(() => {
+        // Keep the editable fields available if the optional migration is absent.
+      })
+      .finally(() => {
+        if (!cancelled) setVehicleDetailsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
 
   const rideHailingFarePkr = Number(rideHailingFareInput);
   const rideHailingFareValid = rideHailingFareInput.trim() !== "" && rideHailingFarePkr > 0;
@@ -758,6 +799,50 @@ export default function LocationSearchForm({
                 Plate and make/model are shown to passengers. Your CNIC from signup is reused
                 privately and never shown on match cards.
               </p>
+              {vehicleDetailsLoading && (
+                <span style={{ fontSize: "12px", color: "var(--rm-ink-soft)" }}>
+                  Loading your saved vehicle details…
+                </span>
+              )}
+              {savedVehicleDetails && !editingVehicleDetails ? (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: "10px",
+                    padding: "10px 12px",
+                    border: "1px solid var(--rm-border)",
+                    borderRadius: "8px",
+                    background: "var(--rm-paper)",
+                  }}
+                >
+                  <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+                    <span style={{ fontSize: "13px", fontWeight: 600, color: "var(--rm-ink)" }}>
+                      {savedVehicleDetails.plate}
+                    </span>
+                    <span style={{ fontSize: "12px", color: "var(--rm-ink-soft)" }}>
+                      {savedVehicleDetails.makeModel || "Vehicle details saved"} · reused for this offer
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setEditingVehicleDetails(true)}
+                    style={{
+                      padding: "6px 9px",
+                      border: "1px solid var(--rm-border)",
+                      borderRadius: "6px",
+                      background: "transparent",
+                      color: "var(--rm-ink)",
+                      fontSize: "11px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Edit
+                  </button>
+                </div>
+              ) : (
+                <>
               <div>
                 <label
                   style={{
@@ -814,6 +899,8 @@ export default function LocationSearchForm({
                   }}
                 />
               </div>
+                </>
+              )}
             </div>
           </div>
         ) : (
@@ -1064,4 +1151,3 @@ export default function LocationSearchForm({
     </div>
   );
 }
-
