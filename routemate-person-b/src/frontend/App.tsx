@@ -711,9 +711,6 @@ export default function App() {
               >
                 RouteSync
               </h1>
-              <span style={{ fontSize: "11px", color: "var(--rm-ink-soft)" }}>
-                Islamabad Carpool Matcher
-              </span>
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -787,18 +784,6 @@ export default function App() {
             >
               Sign out
             </button>
-            <span
-              style={{
-                fontSize: "11px",
-                fontFamily: "var(--rm-font-display)",
-                background: "var(--rm-paper)",
-                border: "1px solid var(--rm-border)",
-                padding: "3px 8px",
-                borderRadius: "6px",
-              }}
-            >
-              ISB GRID
-            </span>
             <button
               type="button"
               onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
