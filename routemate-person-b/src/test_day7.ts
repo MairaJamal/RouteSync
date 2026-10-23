@@ -92,7 +92,7 @@ assert(
   );
   assert(
     buildSosMessage(mapsLink, "Sara") ===
-      `I need help. My current location: ${mapsLink}. I'm on a RouteMate trip with Sara.`,
+      `I need help. My current location: ${mapsLink}. I'm on a RouteSync trip with Sara.`,
     "SOS message with companion name"
   );
   assert(

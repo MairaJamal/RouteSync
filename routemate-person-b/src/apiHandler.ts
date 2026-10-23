@@ -596,6 +596,8 @@ matchesRouter.get("/api/trip-requests/:id/matches", async (req: Request, res: Re
       candidate_preference: candidateReq.gender_preference,
       candidate_origin_label: candidateReq.origin.address_label,
       candidate_destination_label: candidateReq.destination.address_label,
+      candidate_origin: candidateReq.origin,
+      candidate_destination: candidateReq.destination,
       candidate_is_verified: caps.userVerifiedCols ? row.users?.is_verified === true : false,
       candidate_verified_domain: caps.userVerifiedCols ? row.users?.verified_domain ?? null : null,
       candidate_rating: ratingSummaries[candidateReq.user_id] ?? { avg_stars: 0, rating_count: 0 },
@@ -1087,11 +1089,46 @@ matchesRouter.delete(
 matchesRouter.post(
   "/api/rides",
   requireAuth,
-  requireBodyFieldMatchesAuth("driver_id"),
   async (req: Request, res: Response) => {
-  const { driver_id, origin, destination, departure_time } = req.body;
-  if (!driver_id || !origin?.lat || !origin?.lng || !destination?.lat || !destination?.lng) {
+  const {
+    driver_id,
+    passenger_id,
+    origin,
+    destination,
+    passenger_pickup,
+    passenger_dropoff,
+    departure_time,
+  } = req.body;
+  if (
+    typeof driver_id !== "string" ||
+    typeof passenger_id !== "string" ||
+    driver_id === passenger_id ||
+    !origin?.lat ||
+    !origin?.lng ||
+    !destination?.lat ||
+    !destination?.lng ||
+    !passenger_pickup?.lat ||
+    !passenger_pickup?.lng ||
+    !passenger_dropoff?.lat ||
+    !passenger_dropoff?.lng
+  ) {
     return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+  }
+
+  // The authenticated user may create the ride only when they are one of
+  // its two participants. This allows a passenger to accept a driver's
+  // match without silently rewriting driver_id to the passenger.
+  const actingAuthId = req.auth!.userId;
+  const { data: actingProfiles, error: actingProfilesError } = await supabase
+    .from("users")
+    .select("id")
+    .or(`id.eq.${actingAuthId},auth_user_id.eq.${actingAuthId}`);
+  if (actingProfilesError) {
+    return res.status(500).json({ error: "ACTING_PROFILE_LOOKUP_FAILED", details: actingProfilesError.message });
+  }
+  const actingProfileIds = new Set((actingProfiles ?? []).map((row: any) => row.id));
+  if (!actingProfileIds.has(driver_id) && !actingProfileIds.has(passenger_id)) {
+    return res.status(403).json({ error: "RIDE_PARTICIPANT_REQUIRED" });
   }
 
   const caps = await getDbCapabilities();
@@ -1109,7 +1146,7 @@ matchesRouter.post(
       destination_label: destination.address_label ?? null,
       departure_time: departure_time ?? new Date().toISOString(),
       total_seats: 4,
-      available_seats: 4,
+      available_seats: 3,
       driver_max_co_passengers: 3,
       status: "active",
     })
@@ -1117,7 +1154,29 @@ matchesRouter.post(
     .single();
 
   if (error) return res.status(500).json({ error: "RIDE_CREATE_FAILED", details: error.message });
-  return res.status(201).json({ ride_id: data.id });
+
+  const { data: booking, error: bookingError } = await supabase
+    .from("ride_bookings")
+    .insert({
+      ride_id: data.id,
+      passenger_id,
+      pickup_lat: passenger_pickup.lat,
+      pickup_lng: passenger_pickup.lng,
+      pickup_label: passenger_pickup.address_label ?? null,
+      dropoff_lat: passenger_dropoff.lat,
+      dropoff_lng: passenger_dropoff.lng,
+      dropoff_label: passenger_dropoff.address_label ?? null,
+      seats_requested: 1,
+      max_co_passengers: 3,
+      status: "accepted",
+    })
+    .select("id")
+    .single();
+  if (bookingError) {
+    await supabase.from("rides").delete().eq("id", data.id);
+    return res.status(500).json({ error: "RIDE_BOOKING_CREATE_FAILED", details: bookingError.message });
+  }
+  return res.status(201).json({ ride_id: data.id, booking_id: booking.id, driver_id, passenger_id });
 });
 
 matchesRouter.post(

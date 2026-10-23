@@ -17,6 +17,7 @@ import RatingModal from "./RatingModal";
 import VerifiedBadge from "./VerifiedBadge";
 import { LabeledLeg } from "../matchPipeline";
 import { Gender, RatingSummary, GeoJSONLineString } from "../types";
+import { resolveRideParticipants } from "../rideOwnership";
 import "./tokens.css";
 
 interface RouteGeometryBundle {
@@ -32,6 +33,8 @@ interface MatchItem {
   candidatePhone: string;
   candidateSectorFrom: string;
   candidateSectorTo: string;
+  candidateOrigin?: { lat: number; lng: number; address_label: string };
+  candidateDestination?: { lat: number; lng: number; address_label: string };
   candidateIsVerified?: boolean;
   candidateVerifiedDomain?: string | null;
   candidateRating?: RatingSummary | null;
@@ -43,6 +46,7 @@ interface MatchItem {
   fareSplit: { user_id: string; total_fare: number; distance_share_pct?: number; distance_km?: number }[];
   matchType?: "peer_share" | "owner_passenger" | "shared_ride_hailing";
   ownerUserId?: string;
+  passengerUserId?: string;
   vehicleType?: "none" | "car" | "bike" | "ride_hailing";
   /** Only set when matchType === "shared_ride_hailing". */
   sharedFarePkr?: number;
@@ -396,6 +400,8 @@ export default function App() {
         candidatePhone: "Shared after confirmation",
         candidateSectorFrom: m.candidate_origin_label,
         candidateSectorTo: m.candidate_destination_label,
+        candidateOrigin: m.candidate_origin,
+        candidateDestination: m.candidate_destination,
         candidateIsVerified: m.candidate_is_verified === true,
         candidateVerifiedDomain: m.candidate_verified_domain ?? null,
         candidateRating: m.candidate_rating ?? null,
@@ -407,6 +413,7 @@ export default function App() {
         fareSplit: m.fare_split,
         matchType: m.match_type,
         ownerUserId: m.owner_user_id,
+        passengerUserId: m.passenger_user_id,
         vehicleType: m.vehicle_type,
         sharedFarePkr: m.shared_fare_pkr,
         sharedFareNote: m.shared_fare_note,
@@ -443,22 +450,42 @@ export default function App() {
 
     setMatches((prev) => prev.filter((m) => m.id !== id));
 
-    // Day 7: confirming a match creates the ride row that post-trip
-    // ratings hang off. On a pre-migration database this 503s — the match
-    // still confirms locally, ratings just aren't available yet.
-    if (currentUserId && searchCriteria) {
+    const participants = currentUserId
+      ? resolveRideParticipants(currentUserId, {
+          candidateUserId: matchToConfirm.candidateUserId ?? "",
+          matchType: matchToConfirm.matchType,
+          ownerUserId: matchToConfirm.ownerUserId,
+          passengerUserId: matchToConfirm.passengerUserId,
+          vehicleType: matchToConfirm.vehicleType,
+        })
+      : { driverUserId: null, passengerUserId: null, createsOwnedRide: false };
+
+    // Ride-hailing splits use an external driver, so they must not create a
+    // fake RouteSync-owned ride or assign one of the riders as driver.
+    if (participants.createsOwnedRide && participants.driverUserId && participants.passengerUserId && searchCriteria) {
       try {
         const dep = new Date();
         const [hh, mm] = searchCriteria.departureTime.split(":").map(Number);
         if (Number.isFinite(hh) && Number.isFinite(mm)) dep.setHours(hh, mm, 0, 0);
 
+        const passengerIsCurrentUser = participants.passengerUserId === currentUserId;
+        const passengerPickup = passengerIsCurrentUser
+          ? searchCriteria.origin
+          : matchToConfirm.candidateOrigin ?? searchCriteria.origin;
+        const passengerDropoff = passengerIsCurrentUser
+          ? searchCriteria.destination
+          : matchToConfirm.candidateDestination ?? searchCriteria.destination;
+
         const res = await authedFetch(`${API_URL}/api/rides`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            driver_id: currentUserId,
+            driver_id: participants.driverUserId,
+            passenger_id: participants.passengerUserId,
             origin: searchCriteria.origin,
             destination: searchCriteria.destination,
+            passenger_pickup: passengerPickup,
+            passenger_dropoff: passengerDropoff,
             departure_time: dep.toISOString(),
           }),
         });
@@ -471,6 +498,8 @@ export default function App() {
       } catch {
         // Ride creation is best-effort; the match confirmation stands.
       }
+    } else if (matchToConfirm.matchType === "shared_ride_hailing") {
+      setSafetyNotice("Shared cab confirmed — the external ride-hailing driver is not a RouteSync participant.");
     }
 
     const activeUserSplit = matchToConfirm.fareSplit.find((f) => f.user_id === currentUserId);
