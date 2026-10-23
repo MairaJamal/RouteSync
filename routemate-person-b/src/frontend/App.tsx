@@ -807,6 +807,7 @@ export default function App() {
             onSubmit={handleSearch}
             currentUserGender={userProfile?.gender}
             initialUserRole={preferredRole}
+            userId={currentUserId ?? undefined}
           />
         </section>
 
