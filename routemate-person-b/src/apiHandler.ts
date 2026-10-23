@@ -2251,8 +2251,28 @@ matchesRouter.get(
     }
     const threads = [...seen.values()];
 
+    // Chat threads are retained for conversation history, but a completed
+    // ride must not be rehydrated into the active dashboard on a later poll
+    // or page refresh. Rides without a RouteSync ride record (for example,
+    // shared ride-hailing matches) remain visible as before.
+    const rideIds = threads
+      .map((thread) => thread.rideId)
+      .filter((rideId): rideId is string => Boolean(rideId));
+    const completedRideIds = new Set<string>();
+    if (rideIds.length > 0) {
+      const { data: completedRides } = await supabase
+        .from("rides")
+        .select("id")
+        .in("id", rideIds)
+        .eq("status", "completed");
+      for (const ride of completedRides ?? []) completedRideIds.add(ride.id);
+    }
+    const activeThreads = threads.filter(
+      (thread) => !thread.rideId || !completedRideIds.has(thread.rideId)
+    );
+
     return res.json({
-      chats: threads.map((t) => {
+      chats: activeThreads.map((t) => {
         const peerId = t.participantIds.find((id) => !meIds.has(id)) ?? "";
         return {
           chat_id: t.id,
