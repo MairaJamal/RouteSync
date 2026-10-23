@@ -308,6 +308,7 @@ export default function LocationSearchForm({
   defaultMaxCoPassengers = 3,
   currentUserGender,
   initialUserRole = "LOOKING",
+  onRoleChange,
   userId,
 }: {
   onSubmit: (value: TripSearchValue) => void;
@@ -315,6 +316,7 @@ export default function LocationSearchForm({
   currentUserGender?: Gender;
   /** Prefill from signup (driver vs passenger). */
   initialUserRole?: UserRole;
+  onRoleChange?: (role: UserRole) => void;
   /** Signed-in profile used to restore the saved driver vehicle declaration. */
   userId?: string;
 }) {
@@ -411,6 +413,7 @@ export default function LocationSearchForm({
    *  passengers always start on join-a-driver. */
   function handleRoleChange(role: UserRole) {
     setUserRole(role);
+    onRoleChange?.(role);
     if (role === "OFFERING") {
       setRequireDriverGenderMatch(false);
       setRideHailingFareInput("");

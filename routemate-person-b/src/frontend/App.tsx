@@ -92,6 +92,7 @@ export default function App() {
   const [authSession, setAuthSession] = useState<AuthUserSession | null>(null);
   const currentUserId = authSession?.userId ?? "";
   const preferredRole: UserRole = authSession?.preferredRole ?? "LOOKING";
+  const [selectedUserRole, setSelectedUserRole] = useState<UserRole>(preferredRole);
 
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
@@ -120,6 +121,10 @@ export default function App() {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("rm_theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    setSelectedUserRole(preferredRole);
+  }, [preferredRole]);
 
   // Restore an existing Supabase session on first load; otherwise the
   // login / signup screen is shown before any trip UI.
@@ -826,6 +831,7 @@ export default function App() {
             onSubmit={handleSearch}
             currentUserGender={userProfile?.gender}
             initialUserRole={preferredRole}
+            onRoleChange={setSelectedUserRole}
             userId={currentUserId ?? undefined}
           />
         </section>
@@ -836,7 +842,7 @@ export default function App() {
 
         {/* Day 9: browse and request a seat on an already-active pooled
             ride, separate from the 1:1 match flow above. */}
-        {currentUserId && (
+        {currentUserId && selectedUserRole === "LOOKING" && (
           <SharedRideBrowser
             userId={currentUserId}
             pickupPoint={searchCriteria?.origin}
