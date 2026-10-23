@@ -44,7 +44,7 @@ export default function SharedRideBrowser({
   dropoffPoint?: { lat: number; lng: number; address_label: string };
 }) {
   const [rides, setRides] = useState<OpenRideListing[]>([]);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [joiningRideId, setJoiningRideId] = useState<string | null>(null);
   const [outcomes, setOutcomes] = useState<Record<string, JoinOutcome>>({});
@@ -70,7 +70,7 @@ export default function SharedRideBrowser({
   useEffect(() => {
     if (expanded) refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded]);
+  }, [expanded, userId, pickupPoint?.lat, pickupPoint?.lng, dropoffPoint?.lat, dropoffPoint?.lng]);
 
   async function requestToJoin(ride: OpenRideListing) {
     if (!pickupPoint || !dropoffPoint) {
@@ -184,7 +184,7 @@ export default function SharedRideBrowser({
           color: "var(--rm-ink)",
         }}
       >
-        <span>🚗 Join an existing shared ride</span>
+        <span>🚗 Shared ride options — join an existing ride</span>
         <span>{expanded ? "▲" : "▼"}</span>
       </button>
 

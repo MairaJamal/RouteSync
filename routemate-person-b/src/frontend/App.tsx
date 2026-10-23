@@ -718,6 +718,27 @@ export default function App() {
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             {currentUserId && <NotificationBell userId={currentUserId} />}
+            {currentUserId && (
+              <button
+                type="button"
+                title="View all your rides"
+                onClick={() => setDashboardOpen(true)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  fontSize: "11px",
+                  fontFamily: "var(--rm-font-display)",
+                  background: "var(--rm-paper)",
+                  border: "1px solid var(--rm-border)",
+                  padding: "5px 8px",
+                  borderRadius: "6px",
+                  color: "var(--rm-ink)",
+                  cursor: "pointer",
+                }}
+              >
+                Ride history
+              </button>
+            )}
             {userProfile && (
               <button
                 type="button"
