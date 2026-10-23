@@ -2177,7 +2177,7 @@ async function resolveUserAliases(userId: string): Promise<string[]> {
 }
 
 async function assertChatAccess(chatId: string, userId: string): Promise<boolean> {
-  if (userCanAccessChat(chatId, userId)) return true;
+  if (await userCanAccessChat(chatId, userId)) return true;
   const aliases = await resolveUserAliases(userId);
   return grantChatAccessIfAlias(chatId, userId, aliases);
 }
@@ -2202,7 +2202,7 @@ matchesRouter.post(
       return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
     }
 
-    const thread = upsertMatchChat({
+    const thread = await upsertMatchChat({
       myUserId: my_user_id,
       myDisplayName: typeof my_display_name === "string" ? my_display_name : "You",
       peerUserId: peer_user_id,
@@ -2245,9 +2245,9 @@ matchesRouter.get(
     }
 
     const meIds = new Set<string>([authId, pathId]);
-    const seen = new Map<string, NonNullable<ReturnType<typeof getMatchChat>>>();
+    const seen = new Map<string, NonNullable<Awaited<ReturnType<typeof getMatchChat>>>>();
     for (const uid of meIds) {
-      for (const t of listMatchChatsForUser(uid)) seen.set(t.id, t);
+      for (const t of await listMatchChatsForUser(uid)) seen.set(t.id, t);
     }
     const threads = [...seen.values()];
 
@@ -2279,7 +2279,8 @@ matchesRouter.get(
     if (!(await assertChatAccess(chatId, userId))) {
       return res.status(404).json({ error: "CHAT_NOT_FOUND" });
     }
-    const thread = getMatchChat(chatId)!;
+    const thread = await getMatchChat(chatId);
+    if (!thread) return res.status(404).json({ error: "CHAT_NOT_FOUND" });
     const aliases = await resolveUserAliases(userId);
     return res.json({
       chat_id: thread.id,
@@ -2310,7 +2311,7 @@ matchesRouter.post(
         details: "Chat thread was lost (server may have restarted). Close chat and Accept the match again.",
       });
     }
-    const msg = addMatchChatMessage(chatId, user_id, text);
+    const msg = await addMatchChatMessage(chatId, user_id, text);
     if (!msg) {
       return res.status(403).json({
         error: "CHAT_SEND_DENIED",
