@@ -1209,12 +1209,22 @@ matchesRouter.post(
     rideRow.driver_id === user_id || (bookingRows ?? []).some((b) => b.passenger_id === user_id);
   if (!isParticipant) return res.status(403).json({ error: "NOT_A_RIDE_PARTICIPANT" });
 
-  await supabase.from("rides").update({ status: "completed" }).eq("id", req.params.id);
-  await supabase
+  const { error: rideUpdateError } = await supabase
+    .from("rides")
+    .update({ status: "completed" })
+    .eq("id", req.params.id);
+  if (rideUpdateError) {
+    return res.status(500).json({ error: "RIDE_COMPLETION_FAILED", details: rideUpdateError.message });
+  }
+
+  const { error: bookingUpdateError } = await supabase
     .from("ride_bookings")
     .update({ status: "completed" })
     .eq("ride_id", req.params.id)
     .in("status", ["accepted", "pending"]);
+  if (bookingUpdateError) {
+    return res.status(500).json({ error: "BOOKING_COMPLETION_FAILED", details: bookingUpdateError.message });
+  }
 
   // Day 9: write the CO2-avoided ledger for this ride so every
   // rider's profile running total picks it up, not just a one-off
@@ -1418,7 +1428,7 @@ matchesRouter.get(
       const { data: driven } = await supabase
         .from("rides")
         .select(
-          "id, status, origin_label, destination_label, departure_time, created_at, updated_at"
+          "id, status, origin_label, destination_label, departure_time, created_at"
         )
         .eq("driver_id", profileId)
         .in("status", ["completed", "active", "full"])
@@ -1436,7 +1446,10 @@ matchesRouter.get(
           origin_label: r.origin_label || "Pickup",
           destination_label: r.destination_label || "Drop-off",
           departure_time: r.departure_time ?? null,
-          completed_at: r.status === "completed" ? r.updated_at ?? r.created_at : null,
+          // The deployed rides schema has created_at but no updated_at or
+          // completed_at column. Completion changes status in place, so the
+          // ride creation timestamp is the reliable available history time.
+          completed_at: r.status === "completed" ? r.created_at : null,
           co2_saved_kg: carbon?.co2_saved_kg ?? null,
           estimated_fare_saved_pkr: saved != null ? Number(saved.toFixed(0)) : null,
         });
@@ -1445,7 +1458,7 @@ matchesRouter.get(
       const { data: bookings } = await supabase
         .from("ride_bookings")
         .select(
-          "id, ride_id, status, pickup_label, dropoff_label, created_at, rides(id, status, origin_label, destination_label, departure_time, updated_at, created_at)"
+          "id, ride_id, status, pickup_label, dropoff_label, created_at, rides(id, status, origin_label, destination_label, departure_time, created_at)"
         )
         .eq("passenger_id", profileId)
         .in("status", ["accepted", "completed", "pending"])
@@ -1467,7 +1480,7 @@ matchesRouter.get(
           origin_label: b.pickup_label || ride?.origin_label || "Pickup",
           destination_label: b.dropoff_label || ride?.destination_label || "Drop-off",
           departure_time: ride?.departure_time ?? null,
-          completed_at: status === "completed" ? ride?.updated_at ?? b.created_at : null,
+          completed_at: status === "completed" ? ride?.created_at ?? b.created_at : null,
           co2_saved_kg: carbon?.co2_saved_kg ?? null,
           estimated_fare_saved_pkr: saved != null ? Number(saved.toFixed(0)) : null,
         });
