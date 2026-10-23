@@ -104,43 +104,39 @@ function SosModal({
     );
   }, []);
 
-  // Load emergency contacts + log the trigger in parallel.
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await authedFetch(`${API_URL}/api/emergency-contacts?user_id=${encodeURIComponent(userId)}`);
-        if (res.ok) {
-          const payload = await res.json();
-          setContacts(payload.contacts ?? []);
-          return;
-        } else if (res.status === 503) {
-          setContactsError("Emergency contacts aren't enabled on this database yet (Day 7 migration pending).");
-        }
-      } catch {
-        // fallthrough to local storage
+  async function loadContacts() {
+    try {
+      const res = await authedFetch(`${API_URL}/api/emergency-contacts?user_id=${encodeURIComponent(userId)}`);
+      if (res.ok) {
+        const payload = await res.json();
+        setContacts(payload.contacts ?? []);
+        setContactsError(null);
+        return;
       }
-      try {
-        const stored = localStorage.getItem(`rm_contacts_${userId}`);
-        if (stored) {
-          setContacts(JSON.parse(stored));
-        } else {
-          setContacts([
-            {
-              id: "demo-contact-1",
-              user_id: userId,
-              contact_name: "Amna Khan (Sister)",
-              contact_phone: "+923005550199",
-              created_at: new Date().toISOString(),
-            },
-          ]);
-        }
-      } catch {
-        setContactsError("Couldn't load emergency contacts.");
+      if (res.status === 503) {
+        setContactsError("Emergency contacts aren't enabled on this database yet (Day 7 migration pending).");
+        return;
       }
-    })();
+    } catch {
+      // Use locally saved contacts only while the API is temporarily unreachable.
+    }
+    try {
+      const stored = localStorage.getItem(`rm_contacts_${userId}`);
+      setContacts(stored ? JSON.parse(stored) : []);
+    } catch {
+      setContactsError("Couldn't load emergency contacts.");
+    }
+  }
 
-    // Audit trail. Fire-and-forget on purpose: logging must never delay
-    // the user reaching help. A 503 (migration pending) is shown, not thrown.
+  // Load contacts when the SOS modal opens. The alert audit is logged below
+  // only after the browser has a valid location, because the database requires
+  // real coordinates.
+  useEffect(() => {
+    loadContacts();
+  }, [userId]);
+
+  useEffect(() => {
+    if (geo.kind !== "located") return;
     (async () => {
       try {
         const res = await authedFetch(`${API_URL}/api/sos-events`, {
@@ -150,29 +146,15 @@ function SosModal({
             user_id: userId,
             trip_request_id: tripRequestId,
             ride_id: rideId,
+            lat: geo.lat,
+            lng: geo.lng,
           }),
         });
-        setLogged(res.status !== 503);
+        setLogged(res.ok);
       } catch {
         setLogged(false);
       }
     })();
-  }, [userId, tripRequestId, rideId]);
-
-  // Re-log with coordinates once they arrive, so the audit row has them.
-  useEffect(() => {
-    if (geo.kind !== "located") return;
-    authedFetch(`${API_URL}/api/sos-events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        user_id: userId,
-        trip_request_id: tripRequestId,
-        ride_id: rideId,
-        lat: geo.lat,
-        lng: geo.lng,
-      }),
-    }).catch(() => undefined);
   }, [geo, userId, tripRequestId, rideId]);
 
   const mapsLink = geo.kind === "located" ? buildGoogleMapsLink(geo.lat, geo.lng) : null;
@@ -251,7 +233,7 @@ function SosModal({
         {/* Per-contact alert links */}
         {contactsError && <div style={{ fontSize: "12px", color: "var(--rm-danger)" }}>{contactsError}</div>}
         {contacts.length === 0 && !contactsError && (
-          <EmergencyContactsSection userId={userId} />
+          <EmergencyContactsSection userId={userId} onChanged={loadContacts} />
         )}
         {contacts.map((c) => (
           <a
