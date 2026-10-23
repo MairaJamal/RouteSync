@@ -41,6 +41,7 @@ import {
   getStoredCnic,
   IdDocumentType,
 } from "./identityStore";
+import { getRideLifecycle, setRideLifecycle } from "./rideLifecycleStore";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -1179,6 +1180,36 @@ matchesRouter.post(
   return res.status(201).json({ ride_id: data.id, booking_id: booking.id, driver_id, passenger_id });
 });
 
+async function loadRideForParticipant(rideId: string, userId: string) {
+  const { data: ride, error } = await supabase.from("rides").select("*").eq("id", rideId).maybeSingle();
+  if (error || !ride) return { ride: null, bookings: [], allowed: false };
+  const { data: bookings } = await supabase.from("ride_bookings").select("*").eq("ride_id", rideId);
+  const allowed = ride.driver_id === userId || (bookings ?? []).some((b: any) => b.passenger_id === userId);
+  return { ride, bookings: bookings ?? [], allowed };
+}
+
+matchesRouter.get("/api/rides/:id/status", requireAuth, async (req: Request, res: Response) => {
+  const { allowed, ride } = await loadRideForParticipant(String(req.params.id), req.auth!.userId);
+  if (!ride) return res.status(404).json({ error: "RIDE_NOT_FOUND" });
+  if (!allowed) return res.status(403).json({ error: "NOT_A_RIDE_PARTICIPANT" });
+  try {
+    return res.json(await getRideLifecycle(String(req.params.id)));
+  } catch (error) {
+    return res.status(503).json({ error: "RIDE_LIFECYCLE_UNAVAILABLE", details: error instanceof Error ? error.message : "storage unavailable" });
+  }
+});
+
+matchesRouter.post("/api/rides/:id/start", requireAuth, async (req: Request, res: Response) => {
+  const { allowed, ride } = await loadRideForParticipant(String(req.params.id), req.auth!.userId);
+  if (!ride) return res.status(404).json({ error: "RIDE_NOT_FOUND" });
+  if (!allowed) return res.status(403).json({ error: "NOT_A_RIDE_PARTICIPANT" });
+  try {
+    return res.json(await setRideLifecycle(String(req.params.id), "started"));
+  } catch (error) {
+    return res.status(503).json({ error: "RIDE_LIFECYCLE_UNAVAILABLE", details: error instanceof Error ? error.message : "storage unavailable" });
+  }
+});
+
 matchesRouter.post(
   "/api/rides/:id/complete",
   requireAuth,
@@ -1198,6 +1229,16 @@ matchesRouter.post(
 
   if (rideError || !rideRow) return res.status(404).json({ error: "RIDE_NOT_FOUND" });
 
+  let lifecycle;
+  try {
+    lifecycle = await getRideLifecycle(String(req.params.id));
+  } catch (error) {
+    return res.status(503).json({ error: "RIDE_LIFECYCLE_UNAVAILABLE", details: error instanceof Error ? error.message : "storage unavailable" });
+  }
+  if (lifecycle.status !== "started" && lifecycle.status !== "completed") {
+    return res.status(409).json({ error: "RIDE_NOT_STARTED", details: "Start the ride before completing it." });
+  }
+
   const { data: bookingRows, error: bookingsError } = await supabase
     .from("ride_bookings")
     .select("*")
@@ -1215,6 +1256,12 @@ matchesRouter.post(
     .update({ status: "completed" })
     .eq("ride_id", req.params.id)
     .in("status", ["accepted", "pending"]);
+
+  try {
+    lifecycle = await setRideLifecycle(String(req.params.id), "completed");
+  } catch (error) {
+    return res.status(503).json({ error: "RIDE_LIFECYCLE_UNAVAILABLE", details: error instanceof Error ? error.message : "storage unavailable" });
+  }
 
   // Day 9: write the CO2-avoided ledger for this ride so every
   // rider's profile running total picks it up, not just a one-off
@@ -1257,6 +1304,7 @@ matchesRouter.post(
   return res.json({
     ride_id: req.params.id,
     status: "completed",
+    lifecycle_status: lifecycle.status,
     ratable_riders: (ratableRiders.data ?? []).map((u: any) => ({
       user_id: u.id,
       display_name: u.display_name,

@@ -56,6 +56,7 @@ interface MatchItem {
   ownerVehicleMakeModel?: string | null;
   status: "pending" | "confirmed";
   rideId?: string;
+  rideStatus?: "confirmed" | "started" | "completed";
   /** Live chat thread id after Accept (shared with the other user). */
   chatId?: string;
 }
@@ -446,7 +447,7 @@ export default function App() {
     const matchToConfirm = matches.find((m) => m.id === id);
     if (!matchToConfirm) return;
 
-    const confirmed: MatchItem = { ...matchToConfirm, status: "confirmed" };
+    const confirmed: MatchItem = { ...matchToConfirm, status: "confirmed", rideStatus: "confirmed" };
 
     setMatches((prev) => prev.filter((m) => m.id !== id));
 
@@ -571,11 +572,39 @@ export default function App() {
     setActiveChatMatch(null);
   }
 
-  /** Day 7: complete a finished ride, then queue a "Rate your trip"
-   *  modal for every other rider on it. */
+  async function handleStartRide(matchItem: MatchItem) {
+    if (!matchItem.rideId) {
+      setSafetyNotice("This match has no RouteSync ride record, so ride tracking is unavailable.");
+      return;
+    }
+    try {
+      const res = await authedFetch(`${API_URL}/api/rides/${matchItem.rideId}/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        setSafetyNotice(payload.details || payload.error || "Couldn't start the ride.");
+        return;
+      }
+      setConfirmedMatches((prev) =>
+        prev.map((m) => (m.id === matchItem.id ? { ...m, rideStatus: "started" } : m))
+      );
+      setSafetyNotice("Ride started. Complete it when you arrive to rate your fellow rider.");
+    } catch {
+      setSafetyNotice("Couldn't reach the server to start the ride.");
+    }
+  }
+
+  /** Complete a started ride, then queue a "Rate your trip" modal for every
+   * other rider on it. */
   async function handleCompleteTrip(matchItem: MatchItem) {
     if (!matchItem.rideId) {
       setSafetyNotice("This ride has no ride record (Day 7 migration pending), so it can't be rated.");
+      return;
+    }
+    if (matchItem.rideStatus !== "started") {
+      setSafetyNotice("Start the ride first, then complete it when you arrive.");
       return;
     }
     try {
@@ -599,7 +628,9 @@ export default function App() {
         userId: r.user_id,
         displayName: r.display_name,
       }));
-      setConfirmedMatches((prev) => prev.filter((m) => m.id !== matchItem.id));
+      setConfirmedMatches((prev) =>
+        prev.map((m) => (m.id === matchItem.id ? { ...m, rideStatus: "completed" } : m))
+      );
       if (riders.length > 0) {
         setRatingQueue(riders);
       } else {
@@ -867,26 +898,38 @@ export default function App() {
                     onReject={() => {}}
                     onOpenChat={() => openChatForMatch(m)}
                   />
-                  <button
-                    type="button"
-                    onClick={() => handleCompleteTrip(m)}
-                    style={{
-                      alignSelf: "flex-end",
-                      padding: "7px 12px",
-                      fontFamily: "var(--rm-font-display)",
-                      fontSize: "11px",
-                      fontWeight: 600,
-                      letterSpacing: "0.03em",
-                      textTransform: "uppercase",
-                      color: "var(--rm-route-green)",
-                      background: "transparent",
-                      border: "1px solid var(--rm-route-green)",
-                      borderRadius: "8px",
-                      cursor: "pointer",
-                    }}
-                  >
-                    ✓ Arrived — complete trip & rate
-                  </button>
+                  {m.rideId ? (
+                    <div style={{ alignSelf: "flex-end", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      <span style={{ fontSize: "11px", color: "var(--rm-ink-soft)" }}>
+                        {m.rideStatus === "started" ? "● Ride in progress" : "○ Ride confirmed"}
+                      </span>
+                      {m.rideStatus !== "started" && m.rideStatus !== "completed" && (
+                        <button
+                          type="button"
+                          onClick={() => handleStartRide(m)}
+                          style={{ padding: "7px 12px", fontFamily: "var(--rm-font-display)", fontSize: "11px", fontWeight: 600, letterSpacing: "0.03em", textTransform: "uppercase", color: "var(--rm-signal-ink)", background: "var(--rm-signal)", border: "1px solid var(--rm-signal)", borderRadius: "8px", cursor: "pointer" }}
+                        >
+                          ▶ Start ride
+                        </button>
+                      )}
+                      {m.rideStatus === "started" && (
+                        <button
+                          type="button"
+                          onClick={() => handleCompleteTrip(m)}
+                          style={{ padding: "7px 12px", fontFamily: "var(--rm-font-display)", fontSize: "11px", fontWeight: 600, letterSpacing: "0.03em", textTransform: "uppercase", color: "var(--rm-route-green)", background: "transparent", border: "1px solid var(--rm-route-green)", borderRadius: "8px", cursor: "pointer" }}
+                        >
+                          ✓ Complete ride & rate
+                        </button>
+                      )}
+                      {m.rideStatus === "completed" && (
+                        <span style={{ fontSize: "11px", fontWeight: 600, color: "var(--rm-route-green)" }}>✓ Ride completed</span>
+                      )}
+                    </div>
+                  ) : (
+                    <span style={{ alignSelf: "flex-end", fontSize: "11px", color: "var(--rm-ink-soft)" }}>
+                      External ride — RouteSync lifecycle unavailable
+                    </span>
+                  )}
                 </div>
               ))}
 
