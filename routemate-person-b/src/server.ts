@@ -7,6 +7,14 @@ import { matchesRouter } from "./apiHandler";
 
 const app = express();
 
+// Vercel terminates the client connection before forwarding requests to this
+// Express function. Trust that single proxy so express-rate-limit can safely
+// resolve the real client IP from Forwarded/X-Forwarded-For instead of
+// treating Vercel's headers as a validation error.
+if (process.env.VERCEL) {
+  app.set("trust proxy", 1);
+}
+
 app.use(cors());
 app.use(express.json());
 
