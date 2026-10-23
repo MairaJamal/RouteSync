@@ -240,6 +240,16 @@ export async function signIn(email: string, password: string): Promise<AuthUserS
   );
 }
 
+/** Persist the user's latest passenger/driver choice for the next session. */
+export async function rememberPreferredRole(role: UserRole): Promise<void> {
+  try {
+    const { error } = await getClient().auth.updateUser({ data: { preferred_role: role } });
+    if (error) console.warn("[RouteSync] Could not save preferred ride role:", error.message);
+  } catch (error) {
+    console.warn("[RouteSync] Could not save preferred ride role:", error);
+  }
+}
+
 async function saveSignupExtras(
   userId: string,
   identity: SignupIdentity,

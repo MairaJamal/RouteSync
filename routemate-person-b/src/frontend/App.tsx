@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import LocationSearchForm, { TripSearchValue, UserRole } from "./LocationSearchForm";
-import { authedFetch, restoreSession, signOut, AuthUserSession } from "./demoAuth";
+import { authedFetch, restoreSession, signOut, rememberPreferredRole, AuthUserSession } from "./demoAuth";
 import AuthScreen from "./AuthScreen";
 import UserDashboard from "./UserDashboard";
 import MatchCard, { MatchCardSkeleton } from "./MatchCard";
@@ -93,6 +93,7 @@ export default function App() {
   const currentUserId = authSession?.userId ?? "";
   const preferredRole: UserRole = authSession?.preferredRole ?? "LOOKING";
   const [selectedUserRole, setSelectedUserRole] = useState<UserRole>(preferredRole);
+  const archivedChatIdsRef = useRef<Set<string>>(new Set());
 
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
@@ -125,6 +126,40 @@ export default function App() {
   useEffect(() => {
     setSelectedUserRole(preferredRole);
   }, [preferredRole]);
+
+  useEffect(() => {
+    if (!currentUserId) {
+      archivedChatIdsRef.current = new Set();
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(`rm_archived_chats_${currentUserId}`);
+      archivedChatIdsRef.current = new Set<string>(raw ? JSON.parse(raw) : []);
+      setConfirmedMatches((prev) =>
+        prev.filter((m) => !archivedChatIdsRef.current.has(m.chatId ?? "") && !archivedChatIdsRef.current.has(m.id))
+      );
+    } catch {
+      archivedChatIdsRef.current = new Set();
+    }
+  }, [currentUserId]);
+
+  function archiveChat(chatId: string | undefined, id?: string) {
+    if (chatId) archivedChatIdsRef.current.add(chatId);
+    if (id) archivedChatIdsRef.current.add(id);
+    if (currentUserId) {
+      try {
+        localStorage.setItem(
+          `rm_archived_chats_${currentUserId}`,
+          JSON.stringify([...archivedChatIdsRef.current])
+        );
+      } catch {
+        /* The in-session filter below still applies if storage is unavailable. */
+      }
+    }
+    setConfirmedMatches((prev) =>
+      prev.filter((m) => !archivedChatIdsRef.current.has(m.chatId ?? "") && !archivedChatIdsRef.current.has(m.id))
+    );
+  }
 
   // Restore an existing Supabase session on first load; otherwise the
   // login / signup screen is shown before any trip UI.
@@ -199,7 +234,9 @@ export default function App() {
         // A completed ride may still have a persisted chat thread. It belongs
         // in ride history, not back in the active dashboard after polling.
         const activeInbound = inbound.filter(
-          (chat) => !chat.ride_id || !completedIds.has(chat.ride_id)
+          (chat) =>
+            (!chat.ride_id || !completedIds.has(chat.ride_id)) &&
+            !archivedChatIdsRef.current.has(chat.chat_id)
         );
         if (!activeInbound.length || cancelled) return;
 
@@ -422,6 +459,10 @@ export default function App() {
 
       setMatches(liveMatches);
       setSoloEstimates(payload.solo_fare_estimates ?? []);
+      if (authSession && val.userRole !== authSession.preferredRole) {
+        setAuthSession({ ...authSession, preferredRole: val.userRole });
+        void rememberPreferredRole(val.userRole);
+      }
       if (liveMatches.length === 0) {
         setDemoNotice(
           "No overlapping riders yet. Have the other person post the same route (similar time), then search again."
@@ -630,6 +671,7 @@ export default function App() {
       setConfirmedMatches((prev) =>
         prev.map((m) => (m.id === matchItem.id ? { ...m, rideStatus: "completed" } : m))
       );
+      // Completed rides leave the active view but remain available in Past Rides.
       if (riders.length > 0) {
         setRatingQueue(riders);
       } else {
@@ -659,6 +701,11 @@ export default function App() {
     matches[0]?.fareSplit.find((f) => f.user_id === currentUserId)?.total_fare ??
     matches[0]?.fareSplit[0]?.total_fare ??
     240;
+  const visibleConfirmedMatches = confirmedMatches.filter(
+    (m) => !archivedChatIdsRef.current.has(m.chatId ?? "") && !archivedChatIdsRef.current.has(m.id)
+  );
+  const activeConfirmedMatches = visibleConfirmedMatches.filter((m) => m.rideStatus !== "completed");
+  const pastConfirmedMatches = visibleConfirmedMatches.filter((m) => m.rideStatus === "completed");
 
   return (
     <div
@@ -851,7 +898,7 @@ export default function App() {
         )}
 
         {/* Confirmed Matches Section */}
-        {confirmedMatches.length > 0 && (
+        {activeConfirmedMatches.length > 0 && (
           <section style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
             <h2
               style={{
@@ -863,10 +910,10 @@ export default function App() {
                 color: "var(--rm-route-green)",
               }}
             >
-              ✓ Confirmed Rides & Active Chats ({confirmedMatches.length})
+              ✓ Active Rides & Chats ({activeConfirmedMatches.length})
             </h2>
             <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-              {confirmedMatches.map((m) => (
+              {activeConfirmedMatches.map((m) => (
                 <div key={m.id} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                   <MatchCard
                     candidateDisplayName={m.candidateDisplayName}
@@ -931,6 +978,13 @@ export default function App() {
                       {m.rideStatus === "completed" && (
                         <span style={{ fontSize: "11px", fontWeight: 600, color: "var(--rm-route-green)" }}>✓ Ride completed</span>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => archiveChat(m.chatId, m.id)}
+                        style={{ padding: "7px 10px", fontFamily: "var(--rm-font-display)", fontSize: "11px", color: "var(--rm-ink-soft)", background: "transparent", border: "1px solid var(--rm-border)", borderRadius: "8px", cursor: "pointer" }}
+                      >
+                        Archive
+                      </button>
                     </div>
                   ) : (
                     <span style={{ alignSelf: "flex-end", fontSize: "11px", color: "var(--rm-ink-soft)" }}>
@@ -944,6 +998,50 @@ export default function App() {
               {currentUserId && <EmergencyContactsSection userId={currentUserId} />}
               {currentUserId && <VehicleDeclarationSection userId={currentUserId} />}
             </div>
+          </section>
+        )}
+
+        {pastConfirmedMatches.length > 0 && (
+          <section style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            <h2
+              style={{
+                margin: 0,
+                fontSize: "14px",
+                fontFamily: "var(--rm-font-display)",
+                textTransform: "uppercase",
+                letterSpacing: "0.04em",
+                color: "var(--rm-ink-soft)",
+              }}
+            >
+              Past Rides ({pastConfirmedMatches.length})
+            </h2>
+            {pastConfirmedMatches.map((m) => (
+              <div
+                key={m.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "10px",
+                  padding: "10px 12px",
+                  background: "var(--rm-paper-raised)",
+                  border: "1px solid var(--rm-border)",
+                  borderRadius: "var(--rm-radius)",
+                  fontSize: "12px",
+                }}
+              >
+                <span>
+                  {m.candidateDisplayName} · {m.candidateSectorFrom} → {m.candidateSectorTo}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => archiveChat(m.chatId, m.id)}
+                  style={{ padding: "6px 9px", fontFamily: "var(--rm-font-display)", fontSize: "10px", color: "var(--rm-ink-soft)", background: "transparent", border: "1px solid var(--rm-border)", borderRadius: "7px", cursor: "pointer" }}
+                >
+                  Archive
+                </button>
+              </div>
+            ))}
           </section>
         )}
 
