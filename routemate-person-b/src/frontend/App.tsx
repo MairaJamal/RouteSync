@@ -13,7 +13,6 @@ import MatchRequestsPanel, {
   SendRequestValues,
 } from "./matchrequestflow";
 import SharedRideBrowser from "./SharedRideBrowser";
-import RideGroupPanel from "./RideGroupPanel";
 import NotificationBell from "./NotificationBell";
 import { co2SavedSummary } from "../carbonImpact";
 import SosButton from "./SosButton";
@@ -108,7 +107,6 @@ export default function App() {
   const [authSession, setAuthSession] = useState<AuthUserSession | null>(null);
   const currentUserId = authSession?.userId ?? "";
   const preferredRole: UserRole = authSession?.preferredRole ?? "LOOKING";
-  const [selectedUserRole, setSelectedUserRole] = useState<UserRole>(preferredRole);
 
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
@@ -146,10 +144,6 @@ export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     return (typeof window !== "undefined" && (localStorage.getItem("rm_theme") as "light" | "dark")) || "light";
   });
-
-  useEffect(() => {
-    setSelectedUserRole(preferredRole);
-  }, [preferredRole]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -969,6 +963,9 @@ export default function App() {
               >
                 RouteSync
               </h1>
+              <span style={{ fontSize: "11px", color: "var(--rm-ink-soft)" }}>
+                Islamabad Carpool Matcher
+              </span>
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -1021,6 +1018,18 @@ export default function App() {
             >
               Sign out
             </button>
+            <span
+              style={{
+                fontSize: "11px",
+                fontFamily: "var(--rm-font-display)",
+                background: "var(--rm-paper)",
+                border: "1px solid var(--rm-border)",
+                padding: "3px 8px",
+                borderRadius: "6px",
+              }}
+            >
+              ISB GRID
+            </span>
             <button
               type="button"
               onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
@@ -1063,7 +1072,6 @@ export default function App() {
             onSubmit={handleSearch}
             currentUserGender={userProfile?.gender}
             initialUserRole={preferredRole}
-            onRoleChange={setSelectedUserRole}
           />
         </section>
 
@@ -1084,7 +1092,7 @@ export default function App() {
 
         {/* Day 9: browse and request a seat on an already-active pooled
             ride, separate from the 1:1 match flow above. */}
-        {currentUserId && selectedUserRole === "LOOKING" && (
+        {currentUserId && (
           <SharedRideBrowser
             userId={currentUserId}
             pickupPoint={searchCriteria?.origin}
@@ -1195,9 +1203,6 @@ export default function App() {
                         : "✓ Arrived — complete trip & rate"}
                     </button>
                   </div>
-                  {m.rideId && currentUserId && (
-                    <RideGroupPanel rideId={m.rideId} currentUserId={currentUserId} />
-                  )}
                 </div>
               ))}
 
@@ -1538,3 +1543,4 @@ export default function App() {
     </div>
   );
 }
+

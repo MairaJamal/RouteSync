@@ -2064,3 +2064,1515 @@ values (
 )
 on conflict (id) do update set contact_name = excluded.contact_name;
 
+
+
+-- =====================================================================
+-- NOTE: This aggregate bundles schema through 20260902000000 plus the
+-- SafarSync pooling migration below. For a guaranteed end-to-end fresh
+-- project (all consent/notifications/realtime migrations in order), run
+-- supabase/RUN_ALL_MIGRATIONS.sql instead. The block below only depends
+-- on rides / ride_bookings / users / trip_requests, all present above,
+-- so appending it here stays valid.
+-- =====================================================================
+
+-- =====================================================================
+-- FILE: 20261022000000_safarsync_pooling.sql
+-- =====================================================================
+-- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+-- Migration: SafarSync pooled-ride persistence + live sharing (PHASE 1)
+-- Idempotent: every statement is safe to re-run (IF NOT EXISTS /
+-- CREATE OR REPLACE / drop-then-add constraints).
+--
+-- Scope of THIS migration is schema only. It:
+--   1. Adds participant roles + seat-count range to ride_bookings.
+--   2. Adds primary_rider_id / booked_by / ride_mode to rides.
+--   3. Creates ride_messages (per-ride group chat channel).
+--   4. Creates match_chat_threads / match_chat_messages to replace the
+--      .data/match-chats.json persistence in src/chatStore.ts, and
+--      match_requests to replace .data/match-requests.json in
+--      src/frontend/matchrequeststore.ts. Column shapes mirror the
+--      exported TypeScript interfaces so the store rewrites in later
+--      phases keep their function signatures.
+--   5. Creates live_locations + trip_tracking_state for in-app safety
+--      location sharing (replaces the Google-Maps-only TripSharePanel).
+--   6. Adds RLS + a redacting get_ride_participants() RPC.
+--   7. Enables Supabase Realtime on ride_messages and live_locations.
+--
+-- The book_pooled_ride()/respond_to_ride_consent() DUAL-CONSENT changes
+-- are deliberately NOT here вЂ” those are Phase 2. Existing 1:1 / group
+-- booking behaviour is left byte-for-byte intact by this file.
+-- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+-- 0. Convenience: the public.users.id of the caller behind auth.uid().
+--    Mirrors the alias pattern used across the codebase (a person may be
+--    matched by users.id OR by their auth uid), so every policy below can
+--    call current_user_id() instead of re-deriving it.
+create or replace function public.current_user_id()
+returns uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select id
+  from public.users
+  where auth_user_id = auth.uid() or id = auth.uid()
+  limit 1;
+$$;
+
+-- Is p_user_id a legitimate member of this ride? (driver, primary rider,
+-- the ride-hail booker, or an ACCEPTED passenger). Used by RLS below and
+-- by the API layer. SECURITY DEFINER so it can read rides/ride_bookings
+-- regardless of the caller's own row visibility.
+create or replace function public.is_ride_participant(
+  p_ride_id uuid,
+  p_user_id uuid default public.current_user_id()
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select p_user_id is not null and (
+    exists (
+      select 1 from public.rides r
+      where r.id = p_ride_id
+        and (
+          r.driver_id = p_user_id
+          or r.primary_rider_id = p_user_id
+          or r.booked_by = p_user_id
+        )
+    )
+    or exists (
+      select 1 from public.ride_bookings rb
+      where rb.ride_id = p_ride_id
+        and rb.passenger_id = p_user_id
+        and rb.status = 'accepted'
+    )
+  );
+$$;
+
+-- 1. ride_bookings: participant role + a sane seat-count range.
+--    seats_requested already exists (20260825000000_pooling_capacity.sql);
+--    here we only pin its allowed range and add role.
+alter table public.ride_bookings
+  add column if not exists role text not null default 'passenger_joiner';
+
+alter table public.ride_bookings
+  drop constraint if exists ride_bookings_role_check;
+alter table public.ride_bookings
+  add constraint ride_bookings_role_check
+  check (role in ('host_driver', 'host_rider', 'passenger_joiner'));
+
+alter table public.ride_bookings
+  drop constraint if exists ride_bookings_seats_requested_range;
+alter table public.ride_bookings
+  add constraint ride_bookings_seats_requested_range
+  check (seats_requested between 1 and 4);
+
+comment on column public.ride_bookings.role is
+  'host_driver = the driver who owns the ride; host_rider = the primary rider (an approved joiner who created the ride as a rider-share); passenger_joiner = anyone who requested to join. Defaults to passenger_joiner for backwards compatibility with pre-existing bookings.';
+
+-- 2. rides: primary rider, ride-hail booker, and pool mode.
+alter table public.rides
+  add column if not exists primary_rider_id uuid references public.users(id) on delete set null;
+alter table public.rides
+  add column if not exists booked_by uuid references public.users(id) on delete set null;
+alter table public.rides
+  add column if not exists ride_mode text not null default 'car_pool';
+
+alter table public.rides
+  drop constraint if exists rides_ride_mode_check;
+alter table public.rides
+  add constraint rides_ride_mode_check
+  check (ride_mode in ('car_pool', 'ride_hail_share'));
+
+comment on column public.rides.primary_rider_id is
+  'Second approver for dual consent. In car_pool mode this is the lead passenger; when null, only the driver approves.';
+comment on column public.rides.booked_by is
+  'In ride_hail_share mode, the user who booked the Uber/Careem/Yango/inDrive cab and therefore sees every joiner''s details. Null for car_pool.';
+comment on column public.rides.ride_mode is
+  'car_pool = a personal vehicle; ride_hail_share = a booked app cab being split. Drives joiner-detail redaction in get_ride_participants().';
+
+-- 3. ride_messages: the per-ride group chat channel (keyed by ride_id).
+create table if not exists public.ride_messages (
+  id uuid primary key default gen_random_uuid(),
+  ride_id uuid not null references public.rides(id) on delete cascade,
+  sender_id uuid not null references public.users(id) on delete cascade,
+  body text not null check (length(body) between 1 and 2000),
+  created_at timestamptz not null default timezone('utc', now())
+);
+
+create index if not exists idx_ride_messages_ride_created
+  on public.ride_messages(ride_id, created_at);
+
+-- 4a. match_chat_threads / match_chat_messages: replacement store for
+--     src/chatStore.ts. Field names mirror MatchChatThread /
+--     StoredChatMessage. id/pair_key stay TEXT because the store derives
+--     a deterministic "chat_<pairkey>" id and a "a::b" sorted pair key,
+--     and MatchRequest.chatId references it as a string.
+create table if not exists public.match_chat_threads (
+  id text primary key,
+  pair_key text,
+  participant_ids uuid[] not null default '{}'::uuid[],
+  participant_names jsonb not null default '{}'::jsonb,
+  origin_label text not null default 'Pickup',
+  destination_label text not null default 'Drop-off',
+  fare_share_pkr numeric not null default 0,
+  ride_id uuid references public.rides(id) on delete set null,
+  created_at timestamptz not null default timezone('utc', now())
+);
+
+create unique index if not exists idx_match_chat_threads_pair
+  on public.match_chat_threads(pair_key);
+
+create table if not exists public.match_chat_messages (
+  id text primary key,
+  thread_id text not null references public.match_chat_threads(id) on delete cascade,
+  sender_id uuid not null references public.users(id) on delete cascade,
+  "text" text not null check (length("text") between 1 and 2000),
+  created_at timestamptz not null default timezone('utc', now())
+);
+
+create index if not exists idx_match_chat_messages_thread_created
+  on public.match_chat_messages(thread_id, created_at);
+
+-- 4b. match_requests: replacement store for
+--     src/frontend/matchrequeststore.ts. preferences/conditions/snapshot
+--     are JSONB holding the exact MatchRequestPreferences /
+--     MatchRequestConditions / MatchRequestSnapshot object shapes, so the
+--     store functions round-trip them without field-by-field mapping.
+create table if not exists public.match_requests (
+  id text primary key,
+  from_user_id uuid not null references public.users(id) on delete cascade,
+  from_name text not null default '',
+  to_user_id uuid not null references public.users(id) on delete cascade,
+  to_name text not null default '',
+  from_trip_request_id uuid references public.trip_requests(id) on delete set null,
+  to_trip_request_id uuid references public.trip_requests(id) on delete set null,
+  status text not null default 'pending'
+    check (status in ('pending','awaiting_requester','confirmed','declined','cancelled','expired')),
+  preferences jsonb not null default '{}'::jsonb,
+  conditions jsonb,
+  snapshot jsonb not null default '{}'::jsonb,
+  chat_id text references public.match_chat_threads(id) on delete set null,
+  created_at timestamptz not null default timezone('utc', now()),
+  updated_at timestamptz not null default timezone('utc', now()),
+  responded_at timestamptz,
+  confirmed_at timestamptz,
+  expires_at timestamptz not null default (timezone('utc', now()) + interval '24 hours')
+);
+
+create index if not exists idx_match_requests_from on public.match_requests(from_user_id, status);
+create index if not exists idx_match_requests_to   on public.match_requests(to_user_id, status);
+create index if not exists idx_match_requests_expiry on public.match_requests(expires_at);
+
+-- 5a. live_locations: one current position per (ride, user).
+create table if not exists public.live_locations (
+  ride_id uuid not null references public.rides(id) on delete cascade,
+  user_id uuid not null references public.users(id) on delete cascade,
+  lat numeric not null check (lat between -90 and 90),
+  lng numeric not null check (lng between -180 and 180),
+  accuracy numeric,
+  heading numeric,
+  updated_at timestamptz not null default timezone('utc', now()),
+  primary key (ride_id, user_id)
+);
+
+create index if not exists idx_live_locations_updated on public.live_locations(updated_at);
+
+-- 5b. trip_tracking_state: the per-(ride,user) on/off switch that drives
+--     the "Safety tracking active" UI and auto-stop on ride completion.
+create table if not exists public.trip_tracking_state (
+  ride_id uuid not null references public.rides(id) on delete cascade,
+  user_id uuid not null references public.users(id) on delete cascade,
+  sharing boolean not null default false,
+  started_at timestamptz,
+  stopped_at timestamptz,
+  primary key (ride_id, user_id)
+);
+
+-- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+-- 6. Row Level Security.
+--    The API server runs as the service role (bypasses RLS); these
+--    policies protect any direct/authenticated access and are what
+--    Supabase Realtime evaluates for a subscriber's own connection.
+-- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+-- ride_messages: only accepted members may read or post.
+alter table public.ride_messages enable row level security;
+
+drop policy if exists ride_messages_select on public.ride_messages;
+create policy ride_messages_select
+on public.ride_messages for select to authenticated
+using ( public.is_ride_participant(ride_id) );
+
+drop policy if exists ride_messages_insert on public.ride_messages;
+create policy ride_messages_insert
+on public.ride_messages for insert to authenticated
+with check (
+  public.is_ride_participant(ride_id)
+  and sender_id = public.current_user_id()
+);
+
+revoke all on public.ride_messages from public;
+grant select, insert on public.ride_messages to authenticated;
+
+-- live_locations: read = same-ride members; write = own row only.
+alter table public.live_locations enable row level security;
+
+drop policy if exists live_locations_select on public.live_locations;
+create policy live_locations_select
+on public.live_locations for select to authenticated
+using ( public.is_ride_participant(ride_id) );
+
+drop policy if exists live_locations_upsert on public.live_locations;
+create policy live_locations_upsert
+on public.live_locations for insert to authenticated
+with check ( user_id = public.current_user_id() and public.is_ride_participant(ride_id) );
+
+drop policy if exists live_locations_update on public.live_locations;
+create policy live_locations_update
+on public.live_locations for update to authenticated
+using ( user_id = public.current_user_id() )
+with check ( user_id = public.current_user_id() );
+
+revoke all on public.live_locations from public;
+grant select, insert, update on public.live_locations to authenticated;
+
+-- trip_tracking_state: same model as live_locations.
+alter table public.trip_tracking_state enable row level security;
+
+drop policy if exists trip_tracking_state_select on public.trip_tracking_state;
+create policy trip_tracking_state_select
+on public.trip_tracking_state for select to authenticated
+using ( public.is_ride_participant(ride_id) );
+
+drop policy if exists trip_tracking_state_upsert on public.trip_tracking_state;
+create policy trip_tracking_state_upsert
+on public.trip_tracking_state for insert to authenticated
+with check ( user_id = public.current_user_id() and public.is_ride_participant(ride_id) );
+
+drop policy if exists trip_tracking_state_update on public.trip_tracking_state;
+create policy trip_tracking_state_update
+on public.trip_tracking_state for update to authenticated
+using ( user_id = public.current_user_id() )
+with check ( user_id = public.current_user_id() );
+
+revoke all on public.trip_tracking_state from public;
+grant select, insert, update on public.trip_tracking_state to authenticated;
+
+-- Replacement match stores: participant-scoped visibility. The server
+-- reads/writes these via the service role, but the policies enforce the
+-- same invariant for any authenticated read (you only ever see threads
+-- and requests you are a party to).
+alter table public.match_chat_threads enable row level security;
+
+drop policy if exists match_chat_threads_participant on public.match_chat_threads;
+create policy match_chat_threads_participant
+on public.match_chat_threads for select to authenticated
+using ( public.current_user_id() = any (participant_ids) );
+
+revoke all on public.match_chat_threads from public;
+grant select on public.match_chat_threads to authenticated;
+
+alter table public.match_chat_messages enable row level security;
+
+drop policy if exists match_chat_messages_participant on public.match_chat_messages;
+create policy match_chat_messages_participant
+on public.match_chat_messages for select to authenticated
+using (
+  exists (
+    select 1 from public.match_chat_threads t
+    where t.id = thread_id
+      and public.current_user_id() = any (t.participant_ids)
+  )
+);
+
+revoke all on public.match_chat_messages from public;
+grant select on public.match_chat_messages to authenticated;
+
+alter table public.match_requests enable row level security;
+
+drop policy if exists match_requests_party on public.match_requests;
+create policy match_requests_party
+on public.match_requests for select to authenticated
+using (
+  from_user_id = public.current_user_id()
+  or to_user_id = public.current_user_id()
+);
+
+revoke all on public.match_requests from public;
+grant select on public.match_requests to authenticated;
+
+-- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+-- 7. get_ride_participants(ride_id): the SINGLE authorised way to list a
+--    ride's people, with joiner-detail redaction enforced server-side (we
+--    never rely on client filtering).
+--
+--    Visibility of a passenger_joiner's details (name/pickup/dropoff/party
+--    size):
+--      - car_pool: every member sees everything (they must recognise each
+--        other at the roadside).
+--      - ride_hail_share: only the driver, primary rider, or booked_by (a
+--        "host") вЂ” or the joiner themself вЂ” see a joiner's details. Other
+--        joiners see a masked "Fellow rider".
+--    Host identities (driver / primary rider) are never masked.
+--
+--    ASSUMPTION (spec gap): public.users has no phone column today, so no
+--    phone is returned; redaction covers name, pickup, dropoff and party
+--    size. If a phone is added later it must flow through this same RPC.
+-- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+create or replace function public.get_ride_participants(
+  p_ride_id uuid
+)
+returns table (
+  user_id uuid,
+  role text,
+  display_name text,
+  is_verified boolean,
+  seats_requested int,
+  pickup_label text,
+  dropoff_label text,
+  details_visible boolean
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with caller as (
+    select public.current_user_id() as uid
+  ),
+  r as (
+    select id, driver_id, primary_rider_id, booked_by, ride_mode
+    from public.rides
+    where id = p_ride_id
+  ),
+  base as (
+    select rr.driver_id as subject_id, 'host_driver'::text as subject_role,
+           0 as seats_requested, null::text as pickup_label, null::text as dropoff_label
+    from r rr
+    union all
+    select rb.passenger_id, coalesce(rb.role, 'passenger_joiner'),
+           rb.seats_requested, rb.pickup_label, rb.dropoff_label
+    from public.ride_bookings rb
+    where rb.ride_id = p_ride_id and rb.status = 'accepted'
+  )
+  select
+    b.subject_id,
+    b.subject_role,
+    case when mask then 'Fellow rider' else u.display_name end,
+    coalesce(u.is_verified, false),
+    case when mask then null else b.seats_requested end,
+    case when mask then null else b.pickup_label end,
+    case when mask then null else b.dropoff_label end,
+    not mask
+  from base b
+  cross join caller c
+  cross join r
+  join public.users u on u.id = b.subject_id
+  cross join lateral (
+    select (
+      r.ride_mode = 'ride_hail_share'
+      and b.subject_role = 'passenger_joiner'
+      and b.subject_id <> c.uid
+      and not (
+        c.uid = r.driver_id
+        or c.uid = r.primary_rider_id
+        or (r.booked_by is not null and c.uid = r.booked_by)
+      )
+    ) as mask
+  ) m
+  where public.is_ride_participant(p_ride_id, c.uid);
+$$;
+
+revoke all on function public.get_ride_participants(uuid) from public;
+grant execute on function public.get_ride_participants(uuid) to authenticated;
+
+-- current_user_id / is_ride_participant are implementation details of the
+-- policies + RPC above; keep them callable by authenticated but not by
+-- anonymous clients.
+revoke all on function public.current_user_id() from public;
+grant execute on function public.current_user_id() to authenticated;
+
+revoke all on function public.is_ride_participant(uuid, uuid) from public;
+grant execute on function public.is_ride_participant(uuid, uuid) to authenticated;
+
+-- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+-- 8. Supabase Realtime for ride_messages and live_locations.
+--    Guarded so it no-ops on any project where the publication is absent
+--    or already contains the table, and never fails the migration.
+-- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+do $$
+begin
+  if not exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    return;
+  end if;
+
+  begin
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'ride_messages'
+    ) then
+      execute 'alter publication supabase_realtime add table public.ride_messages';
+    end if;
+  exception when others then
+    null;
+  end;
+
+  begin
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'live_locations'
+    ) then
+      execute 'alter publication supabase_realtime add table public.live_locations';
+    end if;
+  exception when others then
+    null;
+  end;
+end $$;
+
+
+
+-- ############################################################
+-- Aggregated copy of: migrations/20261022000001_safarsync_dual_consent.sql  (SafarSync Phase 2: DUAL consent)
+-- ############################################################
+-- ─────────────────────────────────────────────────────────────
+-- Migration: SafarSync DUAL CONSENT (PHASE 2). Idempotent.
+--
+-- CHANGE from the 20260904 / 20260905 / 20260906 unanimous model:
+-- a 3rd/4th/5th rider's join is now approved by EXACTLY TWO people —
+-- the ride's driver (host_driver) and its primary rider (host_rider) —
+-- not by every existing passenger. Other riders already in the pool get
+-- a read-only 'ride_update' notice, no vote.
+--
+--   * The FIRST passenger to join (the 1:1 auto-accept) is designated
+--     the primary rider: their booking role = 'host_rider' and
+--     rides.primary_rider_id is set (if not already). This is the second
+--     approver for every later join.
+--   * rides.driver_id AND rides.primary_rider_id are de-duplicated, so a
+--     solo driver who is also the primary rider yields ONE consent row.
+--   * If primary_rider_id is still null (a legacy ride with no
+--     designated primary), only the driver approves.
+--
+-- The 1:1 fast path is otherwise unchanged (auto-accept, no consent).
+-- Seat reservation already honoured p_seats_requested (Phase 1 added the
+-- 1..4 range CHECK); that behaviour is preserved.
+--
+-- respond_to_ride_consent(): unchanged terminal rules — any decline
+-- cancels + restores seats + closes remaining votes; when the (now two)
+-- approvals are all in, the booking flips to 'accepted'. Group chat for
+-- the accepted joiner unlocks automatically via the ride_messages RLS
+-- policy added in Phase 1 (an accepted participant can read/write the
+-- ride channel), so no explicit "create chat" step lives in this RPC.
+-- ─────────────────────────────────────────────────────────────
+
+-- 'ride_update' joins the notification vocabulary for read-only pings to
+-- non-approver riders.
+alter table public.notifications
+  drop constraint if exists notifications_kind_check;
+alter table public.notifications
+  add constraint notifications_kind_check
+  check (kind in (
+    'consent_requested', 'consent_reminder', 'consent_resolved', 'consent_expired',
+    'ride_update'
+  ));
+
+-- ─────────────────────────────────────────────────────────────
+-- book_pooled_ride(): dual-consent version.
+-- ─────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION book_pooled_ride(
+  p_ride_id UUID,
+  p_passenger_id UUID,
+  p_pickup_lat NUMERIC,
+  p_pickup_lng NUMERIC,
+  p_pickup_label TEXT,
+  p_dropoff_lat NUMERIC,
+  p_dropoff_lng NUMERIC,
+  p_dropoff_label TEXT,
+  p_seats_requested INT,
+  p_max_co_passengers INT
+)
+RETURNS TABLE (
+  booking_id UUID,
+  success BOOLEAN,
+  reason TEXT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_ride RECORD;
+  v_existing_booking RECORD;
+  v_proposed_count INT;
+  v_total_riders INT;
+  v_new_booking_id UUID;
+  v_status TEXT;
+  v_reason TEXT;
+  v_role TEXT;
+  v_expires_at TIMESTAMPTZ;
+  v_joiner_name TEXT;
+  v_voter RECORD;
+BEGIN
+  SELECT * INTO v_ride
+  FROM rides
+  WHERE id = p_ride_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'RIDE_NOT_FOUND';
+    RETURN;
+  END IF;
+
+  IF v_ride.status != 'active' THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'RIDE_NOT_ACTIVE';
+    RETURN;
+  END IF;
+
+  SELECT COUNT(*) INTO v_proposed_count
+  FROM ride_bookings
+  WHERE ride_id = p_ride_id AND status IN ('accepted', 'pending', 'pending_consent');
+
+  v_proposed_count := v_proposed_count + 1;
+  v_total_riders := v_proposed_count + 1; -- + driver
+
+  -- 1. Driver Cap
+  IF v_ride.driver_max_co_passengers IS NOT NULL AND v_proposed_count > v_ride.driver_max_co_passengers THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'DRIVER_CAP_EXCEEDED';
+    RETURN;
+  END IF;
+
+  -- 2. Candidate Passenger Cap
+  IF p_max_co_passengers IS NOT NULL AND p_max_co_passengers != -1 AND v_proposed_count > p_max_co_passengers THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'PASSENGER_CAP_EXCEEDED';
+    RETURN;
+  END IF;
+
+  -- 3. Existing Passengers' Caps ("most restrictive passenger wins")
+  FOR v_existing_booking IN
+    SELECT max_co_passengers
+    FROM ride_bookings
+    WHERE ride_id = p_ride_id AND status IN ('accepted', 'pending', 'pending_consent')
+  LOOP
+    IF v_existing_booking.max_co_passengers IS NOT NULL
+       AND v_existing_booking.max_co_passengers != -1
+       AND v_proposed_count > v_existing_booking.max_co_passengers THEN
+      RETURN QUERY SELECT NULL::UUID, FALSE, 'EXISTING_PASSENGER_CAP_VIOLATED';
+      RETURN;
+    END IF;
+  END LOOP;
+
+  -- 4. Seat Availability
+  IF v_ride.available_seats < p_seats_requested THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'INSUFFICIENT_SEATS';
+    RETURN;
+  END IF;
+
+  -- 2 total riders (driver + this passenger, pool was empty) auto-accepts
+  -- AND this passenger is designated the primary rider / second approver.
+  -- 3+ total riders requires dual consent from driver + primary rider.
+  IF v_total_riders >= 3 THEN
+    v_status := 'pending_consent';
+    v_reason := 'AWAITING_GROUP_CONSENT';
+    v_role := 'passenger_joiner';
+    v_expires_at := now() + interval '30 minutes';
+  ELSE
+    v_status := 'accepted';
+    v_reason := 'SUCCESS';
+    v_role := 'host_rider';
+    v_expires_at := NULL;
+  END IF;
+
+  INSERT INTO ride_bookings (
+    ride_id, passenger_id, pickup_lat, pickup_lng, pickup_label,
+    dropoff_lat, dropoff_lng, dropoff_label, seats_requested, max_co_passengers,
+    role, status, expires_at
+  ) VALUES (
+    p_ride_id, p_passenger_id, p_pickup_lat, p_pickup_lng, p_pickup_label,
+    p_dropoff_lat, p_dropoff_lng, p_dropoff_label, p_seats_requested, p_max_co_passengers,
+    v_role, v_status, v_expires_at
+  ) RETURNING id INTO v_new_booking_id;
+
+  -- Reserve seats immediately either way (declines restore them below).
+  UPDATE rides
+  SET available_seats = available_seats - p_seats_requested
+  WHERE id = p_ride_id;
+
+  -- Designate the primary rider on the 1:1 auto-accept, if unset.
+  IF v_status = 'accepted' AND v_ride.primary_rider_id IS NULL THEN
+    UPDATE rides SET primary_rider_id = p_passenger_id WHERE id = p_ride_id;
+  END IF;
+
+  SELECT display_name INTO v_joiner_name FROM users WHERE id = p_passenger_id;
+  v_joiner_name := COALESCE(v_joiner_name, 'A rider');
+
+  IF v_status = 'pending_consent' THEN
+    -- DUAL CONSENT: exactly two approvers, driver + primary rider,
+    -- de-duplicated, nulls skipped.
+    INSERT INTO ride_consents (ride_id, booking_id, rider_id, status)
+    SELECT DISTINCT p_ride_id, v_new_booking_id, approver.rid, 'awaiting'
+    FROM (
+      SELECT v_ride.driver_id AS rid
+      UNION ALL
+      SELECT v_ride.primary_rider_id
+    ) approver
+    WHERE approver.rid IS NOT NULL;
+
+    -- Notify each approver that a vote is waiting.
+    FOR v_voter IN
+      SELECT rc.rider_id FROM ride_consents rc WHERE rc.booking_id = v_new_booking_id
+    LOOP
+      INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+      VALUES (
+        v_voter.rider_id,
+        'consent_requested',
+        'Approval needed',
+        v_joiner_name || ' wants to join your shared ride. The driver and primary rider must both approve.',
+        p_ride_id,
+        v_new_booking_id
+      );
+    END LOOP;
+
+    -- The joiner sees their own request as pending in their feed (no vote).
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    VALUES (
+      p_passenger_id,
+      'consent_requested',
+      'Request sent',
+      'Your request to join was sent and is awaiting host approval.',
+      p_ride_id,
+      v_new_booking_id
+    );
+
+    -- Read-only notice to every OTHER accepted rider (not an approver):
+    -- their ride is changing, but they don't vote.
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    SELECT rb.passenger_id, 'ride_update', 'A rider asked to join',
+           v_joiner_name || ' asked to join your ride. The hosts are reviewing it.',
+           p_ride_id, v_new_booking_id
+    FROM ride_bookings rb
+    WHERE rb.ride_id = p_ride_id
+      AND rb.status = 'accepted'
+      AND rb.id != v_new_booking_id
+      AND rb.passenger_id <> v_ride.driver_id
+      AND rb.passenger_id <> v_ride.primary_rider_id;
+  END IF;
+
+  RETURN QUERY SELECT v_new_booking_id, TRUE, v_reason;
+END;
+$$;
+
+-- ─────────────────────────────────────────────────────────────
+-- respond_to_ride_consent(): unchanged decision rules (any decline
+-- cancels; both approvals accept) plus read-only 'ride_update' pings to
+-- non-approver riders at each terminal outcome, so "everyone is notified"
+-- even though only two people actually vote.
+-- ─────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION respond_to_ride_consent(
+  p_booking_id UUID,
+  p_rider_id UUID,
+  p_agree BOOLEAN
+)
+RETURNS TABLE (
+  success BOOLEAN,
+  booking_status TEXT,
+  reason TEXT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_booking RECORD;
+  v_ride RECORD;
+  v_consent RECORD;
+  v_awaiting_count INT;
+  v_declined_count INT;
+  v_joiner_name TEXT;
+BEGIN
+  SELECT * INTO v_booking
+  FROM ride_bookings
+  WHERE id = p_booking_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT FALSE, NULL::TEXT, 'BOOKING_NOT_FOUND';
+    RETURN;
+  END IF;
+
+  SELECT * INTO v_ride FROM rides WHERE id = v_booking.ride_id;
+
+  SELECT display_name INTO v_joiner_name FROM users WHERE id = v_booking.passenger_id;
+  v_joiner_name := COALESCE(v_joiner_name, 'A rider');
+
+  -- A vote arriving after the deadline must not resurrect a booking
+  -- whose seat may already be considered forfeited.
+  IF v_booking.status = 'pending_consent' AND v_booking.expires_at IS NOT NULL AND v_booking.expires_at < now() THEN
+    UPDATE ride_bookings SET status = 'cancelled' WHERE id = p_booking_id;
+    UPDATE rides SET available_seats = available_seats + v_booking.seats_requested WHERE id = v_booking.ride_id;
+    UPDATE ride_consents rc SET status = 'expired', responded_at = now()
+      WHERE rc.booking_id = p_booking_id AND rc.status = 'awaiting';
+
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    VALUES (v_booking.passenger_id, 'consent_expired', 'Join request expired',
+            'Nobody finished approving in time, so your request to join was automatically cancelled.',
+            v_booking.ride_id, p_booking_id);
+
+    RETURN QUERY SELECT FALSE, 'cancelled', 'CONSENT_EXPIRED';
+    RETURN;
+  END IF;
+
+  IF v_booking.status != 'pending_consent' THEN
+    RETURN QUERY SELECT FALSE, v_booking.status, 'NOT_AWAITING_CONSENT';
+    RETURN;
+  END IF;
+
+  SELECT * INTO v_consent
+  FROM ride_consents
+  WHERE booking_id = p_booking_id AND rider_id = p_rider_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT FALSE, v_booking.status, 'NOT_A_VOTER_ON_THIS_BOOKING';
+    RETURN;
+  END IF;
+
+  IF v_consent.status != 'awaiting' THEN
+    RETURN QUERY SELECT FALSE, v_booking.status, 'ALREADY_RESPONDED';
+    RETURN;
+  END IF;
+
+  UPDATE ride_consents
+  SET status = CASE WHEN p_agree THEN 'agreed' ELSE 'declined' END,
+      responded_at = now()
+  WHERE id = v_consent.id;
+
+  IF NOT p_agree THEN
+    UPDATE ride_bookings SET status = 'cancelled' WHERE id = p_booking_id;
+    UPDATE rides SET available_seats = available_seats + v_booking.seats_requested WHERE id = v_booking.ride_id;
+    UPDATE ride_consents rc SET status = 'declined', responded_at = now()
+      WHERE rc.booking_id = p_booking_id AND rc.status = 'awaiting';
+
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    VALUES (v_booking.passenger_id, 'consent_resolved', 'Your request was answered',
+            'A host declined your request to join.', v_booking.ride_id, p_booking_id);
+
+    -- Read-only heads-up to the other riders that the pending join fell through.
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    SELECT rb.passenger_id, 'ride_update', 'Join request closed',
+           v_joiner_name || '''s join request was not approved.', v_booking.ride_id, p_booking_id
+    FROM ride_bookings rb
+    WHERE rb.ride_id = v_booking.ride_id AND rb.status = 'accepted' AND rb.id != p_booking_id
+      AND rb.passenger_id <> v_ride.driver_id
+      AND rb.passenger_id <> v_ride.primary_rider_id;
+
+    RETURN QUERY SELECT TRUE, 'cancelled', 'DECLINED';
+    RETURN;
+  END IF;
+
+  SELECT
+    COUNT(*) FILTER (WHERE status = 'awaiting'),
+    COUNT(*) FILTER (WHERE status = 'declined')
+  INTO v_awaiting_count, v_declined_count
+  FROM ride_consents
+  WHERE booking_id = p_booking_id;
+
+  IF v_declined_count > 0 THEN
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    SELECT v_booking.passenger_id, 'consent_resolved', 'Your request was answered',
+           'A host declined your request to join.', v_booking.ride_id, p_booking_id
+    WHERE NOT EXISTS (
+      SELECT 1 FROM notifications WHERE booking_id = p_booking_id AND kind = 'consent_resolved'
+    );
+    RETURN QUERY SELECT TRUE, 'cancelled', 'DECLINED';
+    RETURN;
+  END IF;
+
+  IF v_awaiting_count = 0 THEN
+    UPDATE ride_bookings SET status = 'accepted' WHERE id = p_booking_id;
+
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    VALUES (v_booking.passenger_id, 'consent_resolved', 'Your request was answered',
+            'Both hosts approved your request to join.', v_booking.ride_id, p_booking_id);
+
+    -- Read-only confirmation to the other riders that a new member joined.
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    SELECT rb.passenger_id, 'ride_update', 'A rider joined',
+           v_joiner_name || ' was approved and joined your ride.', v_booking.ride_id, p_booking_id
+    FROM ride_bookings rb
+    WHERE rb.ride_id = v_booking.ride_id AND rb.status = 'accepted' AND rb.id != p_booking_id
+      AND rb.passenger_id <> v_ride.driver_id
+      AND rb.passenger_id <> v_ride.primary_rider_id;
+
+    RETURN QUERY SELECT TRUE, 'accepted', 'ALL_AGREED';
+    RETURN;
+  END IF;
+
+  RETURN QUERY SELECT TRUE, 'pending_consent', 'AWAITING_OTHERS';
+END;
+$$;
+
+-- Same grants as the prior versions (idempotent re-assert).
+revoke all on function public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int
+) from public;
+grant execute on function public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int
+) to authenticated;
+alter function public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int
+) security definer set search_path = public;
+
+revoke all on function public.respond_to_ride_consent(uuid, uuid, boolean) from public;
+grant execute on function public.respond_to_ride_consent(uuid, uuid, boolean) to authenticated;
+alter function public.respond_to_ride_consent(uuid, uuid, boolean)
+  security definer set search_path = public;
+
+
+-- ############################################################
+-- Aggregated copy of: migrations/20261022000002_safarsync_api.sql  (SafarSync Phase 3: API-support)
+-- ############################################################
+-- ─────────────────────────────────────────────────────────────
+-- Migration: SafarSync API-support (PHASE 3). Idempotent.
+--
+-- Phase 3 wires the Express endpoints for ride group chat, live location
+-- sharing, and authorised participant listing. The tables themselves are
+-- created by Phase 1 (20261022000000_safarsync_pooling.sql). This file
+-- re-asserts them (all IF NOT EXISTS — a no-op when Phase 1 is applied)
+-- so the Phase 3 API path can be deployed/applied on its own without a
+-- hidden dependency, and adds the ONE genuine change Phase 3 needs:
+--
+--   * get_ride_participants(ride_id, viewer_id) — an optional second
+--     argument. The API server talks to Supabase as the service role, so
+--     auth.uid() is NULL in its context and the original single-arg RPC
+--     (which derives the viewer from auth.uid()) returns no rows when the
+--     server calls it. The overload lets the server pass the acting
+--     user's canonical public.users.id explicitly. The 1-arg call keeps
+--     working unchanged (defaults to current_user_id()), so any direct
+--     client / Realtime usage is byte-for-byte identical to Phase 1.
+-- ─────────────────────────────────────────────────────────────
+
+-- 1. ride_messages: the per-ride group chat channel (keyed by ride_id).
+create table if not exists public.ride_messages (
+  id uuid primary key default gen_random_uuid(),
+  ride_id uuid not null references public.rides(id) on delete cascade,
+  sender_id uuid not null references public.users(id) on delete cascade,
+  body text not null check (length(body) between 1 and 2000),
+  created_at timestamptz not null default timezone('utc', now())
+);
+create index if not exists idx_ride_messages_ride_created
+  on public.ride_messages(ride_id, created_at);
+
+-- 2. live_locations: one current position per (ride, user).
+create table if not exists public.live_locations (
+  ride_id uuid not null references public.rides(id) on delete cascade,
+  user_id uuid not null references public.users(id) on delete cascade,
+  lat numeric not null check (lat between -90 and 90),
+  lng numeric not null check (lng between -180 and 180),
+  accuracy numeric,
+  heading numeric,
+  updated_at timestamptz not null default timezone('utc', now()),
+  primary key (ride_id, user_id)
+);
+create index if not exists idx_live_locations_updated on public.live_locations(updated_at);
+
+-- 3. trip_tracking_state: the per-(ride,user) on/off switch that drives
+--    the "Safety tracking active" UI and auto-stop on ride completion.
+create table if not exists public.trip_tracking_state (
+  ride_id uuid not null references public.rides(id) on delete cascade,
+  user_id uuid not null references public.users(id) on delete cascade,
+  sharing boolean not null default false,
+  started_at timestamptz,
+  stopped_at timestamptz,
+  primary key (ride_id, user_id)
+);
+
+-- Re-assert RLS + grants (identical to Phase 1; idempotent) so a
+-- Phase-3-only apply is still protected. The API server uses the service
+-- role and bypasses these; they guard any direct/authenticated access.
+alter table public.ride_messages enable row level security;
+drop policy if exists ride_messages_select on public.ride_messages;
+create policy ride_messages_select
+on public.ride_messages for select to authenticated
+using ( public.is_ride_participant(ride_id) );
+drop policy if exists ride_messages_insert on public.ride_messages;
+create policy ride_messages_insert
+on public.ride_messages for insert to authenticated
+with check ( public.is_ride_participant(ride_id) and sender_id = public.current_user_id() );
+revoke all on public.ride_messages from public;
+grant select, insert on public.ride_messages to authenticated;
+
+alter table public.live_locations enable row level security;
+drop policy if exists live_locations_select on public.live_locations;
+create policy live_locations_select
+on public.live_locations for select to authenticated
+using ( public.is_ride_participant(ride_id) );
+drop policy if exists live_locations_upsert on public.live_locations;
+create policy live_locations_upsert
+on public.live_locations for insert to authenticated
+with check ( user_id = public.current_user_id() and public.is_ride_participant(ride_id) );
+drop policy if exists live_locations_update on public.live_locations;
+create policy live_locations_update
+on public.live_locations for update to authenticated
+using ( user_id = public.current_user_id() )
+with check ( user_id = public.current_user_id() );
+revoke all on public.live_locations from public;
+grant select, insert, update on public.live_locations to authenticated;
+
+alter table public.trip_tracking_state enable row level security;
+drop policy if exists trip_tracking_state_select on public.trip_tracking_state;
+create policy trip_tracking_state_select
+on public.trip_tracking_state for select to authenticated
+using ( public.is_ride_participant(ride_id) );
+drop policy if exists trip_tracking_state_upsert on public.trip_tracking_state;
+create policy trip_tracking_state_upsert
+on public.trip_tracking_state for insert to authenticated
+with check ( user_id = public.current_user_id() and public.is_ride_participant(ride_id) );
+drop policy if exists trip_tracking_state_update on public.trip_tracking_state;
+create policy trip_tracking_state_update
+on public.trip_tracking_state for update to authenticated
+using ( user_id = public.current_user_id() )
+with check ( user_id = public.current_user_id() );
+revoke all on public.trip_tracking_state from public;
+grant select, insert, update on public.trip_tracking_state to authenticated;
+
+-- ─────────────────────────────────────────────────────────────
+-- 4. get_ride_participants: add an optional p_viewer_id so the
+--    service-role API server can compute masking for a specific user.
+--    Same masking rules as Phase 1:
+--      - car_pool: every member sees everything.
+--      - ride_hail_share: only a host (driver / primary rider / booked_by)
+--        or the joiner themself see a passenger_joiner's details; other
+--        joiners see a masked "Fellow rider". Host identity is never masked.
+-- ─────────────────────────────────────────────────────────────
+create or replace function public.get_ride_participants(
+  p_ride_id uuid,
+  p_viewer_id uuid default public.current_user_id()
+)
+returns table (
+  user_id uuid,
+  role text,
+  display_name text,
+  is_verified boolean,
+  seats_requested int,
+  pickup_label text,
+  dropoff_label text,
+  details_visible boolean
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with r as (
+    select id, driver_id, primary_rider_id, booked_by, ride_mode
+    from public.rides
+    where id = p_ride_id
+  ),
+  base as (
+    select rr.driver_id as subject_id, 'host_driver'::text as subject_role,
+           0 as seats_requested, null::text as pickup_label, null::text as dropoff_label
+    from r rr
+    union all
+    select rb.passenger_id, coalesce(rb.role, 'passenger_joiner'),
+           rb.seats_requested, rb.pickup_label, rb.dropoff_label
+    from public.ride_bookings rb
+    where rb.ride_id = p_ride_id and rb.status = 'accepted'
+  )
+  select
+    b.subject_id,
+    b.subject_role,
+    case when mask then 'Fellow rider' else u.display_name end,
+    coalesce(u.is_verified, false),
+    case when mask then null else b.seats_requested end,
+    case when mask then null else b.pickup_label end,
+    case when mask then null else b.dropoff_label end,
+    not mask
+  from base b
+  cross join r
+  join public.users u on u.id = b.subject_id
+  cross join lateral (
+    select (
+      r.ride_mode = 'ride_hail_share'
+      and b.subject_role = 'passenger_joiner'
+      and b.subject_id <> p_viewer_id
+      and not (
+        p_viewer_id = r.driver_id
+        or p_viewer_id = r.primary_rider_id
+        or (r.booked_by is not null and p_viewer_id = r.booked_by)
+      )
+    ) as mask
+  ) m
+  where public.is_ride_participant(p_ride_id, p_viewer_id);
+$$;
+
+revoke all on function public.get_ride_participants(uuid, uuid) from public;
+grant execute on function public.get_ride_participants(uuid, uuid) to authenticated;
+
+-- ========================================================
+-- Migration: 20261023000000_party_size.sql
+-- ========================================================
+-- ─────────────────────────────────────────────────────────────
+-- Migration: Party size ("I am 2 people") + people-count occupancy.
+-- Idempotent: every statement is safe to re-run (IF NOT EXISTS /
+-- CREATE OR REPLACE / drop-then-add constraints / drop-then-create
+-- function with the new signature).
+--
+-- DEFINITIONS (stated once here; used everywhere these rules flow —
+-- the RPCs below, the poolingCapacity.ts TS mirror, and apiHandler.ts):
+--   * party_size = number of people travelling together under ONE
+--     account (1..4). The account holder is the lead. Optional
+--     party_member_names (text[], max 3) so the driver knows who else
+--     is coming.
+--   * A party is ONE booking with seats_requested = party_size. Never
+--     one booking per person.
+--   * Occupancy is counted in PEOPLE, not bookings:
+--     occupied_people = the host slot counts as 1 person (driver in
+--     car_pool; the booker in ride_hail_share) UNLESS that same user
+--     already holds an active booking — their own party booking then
+--     includes them as its lead, so the slot adds nothing — PLUS
+--     SUM(seats_requested) over bookings with status in
+--     ('accepted','pending','pending_consent'). pending and
+--     pending_consent are RESERVED seats and count toward occupancy.
+--   * rides.total_seats stays PASSENGER seats (excluding the driver);
+--     available_seats = total_seats - SUM(reserved seats). The UI shows
+--     PEOPLE including the driver: a "max 3 people" car is
+--     total_seats = 2. For ride_mode = 'ride_hail_share' the booker
+--     declares the cab's TOTAL people capacity (usually 4) in
+--     total_seats, and the booker's own party are the first occupants.
+--
+-- WHAT THIS FILE DOES:
+--   1. trip_requests.party_size (int, 1..4, default 1).
+--   2. ride_bookings.party_member_names (text[], max 3) and re-asserts
+--      the seats_requested 1..4 range CHECK.
+--   3. Replaces book_pooled_ride(): every COUNT(*)-of-bookings capacity
+--      check now counts PEOPLE (driver cap, candidate max_co_passengers
+--      cap, "most restrictive passenger wins" loop). Adds rejection
+--      reason PARTY_TOO_LARGE_FOR_REMAINING_SEATS (remaining_seats is
+--      included in the returned data); every existing reason code is
+--      unchanged. The SELECT ... FOR UPDATE row lock is kept so
+--      concurrent joins cannot overbook. Consent rule is unchanged: a
+--      join that brings the ride to 3+ TOTAL PEOPLE needs dual consent
+--      from the driver and the primary rider only — so a party of 2
+--      joining a driver-only car (3 people) also needs consent.
+--   4. Adds get_ride_occupancy(ride_id): total_people_capacity,
+--      occupied_people, seats_left, status ('open'|'full') and
+--      co_riders[] with server-side redaction.
+--
+-- ASSUMPTION (the task spec was cut off mid-sentence at "in
+-- ride_hail_share only booked_by sees …"): joiner-detail redaction
+-- follows the rule ALREADY SHIPPED in get_ride_participants — in
+-- ride_hail_share only a host (driver / primary rider / booked_by) or
+-- the joiner themself sees a joiner's name, party size and party
+-- member names; every other viewer sees a masked "Fellow rider" with
+-- null party details. car_pool never masks. Aggregate counts
+-- (occupied_people, seats_left) are never masked — they carry no PII.
+-- ─────────────────────────────────────────────────────────────
+
+-- 1. trip_requests.party_size — the real trip request table is
+--    public.trip_requests (20260822000000_trip_matching.sql).
+alter table public.trip_requests
+  add column if not exists party_size int not null default 1;
+
+alter table public.trip_requests
+  drop constraint if exists trip_requests_party_size_check;
+alter table public.trip_requests
+  add constraint trip_requests_party_size_check
+  check (party_size between 1 and 4);
+
+comment on column public.trip_requests.party_size is
+  'People travelling together under this one account (lead included), 1..4. A party is ONE request/booking with seats_requested = party_size — never one per person.';
+
+-- 2. ride_bookings.party_member_names + seats range re-assert.
+alter table public.ride_bookings
+  add column if not exists party_member_names text[] not null default '{}'::text[];
+
+alter table public.ride_bookings
+  drop constraint if exists ride_bookings_party_member_names_max;
+alter table public.ride_bookings
+  add constraint ride_bookings_party_member_names_max
+  check (coalesce(array_length(party_member_names, 1), 0) <= 3);
+
+comment on column public.ride_bookings.party_member_names is
+  'Optional names of the people joining the lead (max 3) so the driver knows who is coming. The lead is never in this list; party size is seats_requested.';
+
+alter table public.ride_bookings
+  drop constraint if exists ride_bookings_seats_requested_range;
+alter table public.ride_bookings
+  add constraint ride_bookings_seats_requested_range
+  check (seats_requested between 1 and 4);
+
+-- ─────────────────────────────────────────────────────────────
+-- 3. book_pooled_ride(): people-count version. The previous signature
+--    (10 args) is dropped so PostgREST resolves exactly one function;
+--    p_party_member_names is a NEW trailing arg with a default, so
+--    existing callers that omit it keep working unchanged. The return
+--    table gains remaining_seats (set on seat rejections and on
+--    success), which is why a drop-then-create is required — CREATE OR
+--    REPLACE cannot change a return type.
+-- ─────────────────────────────────────────────────────────────
+drop function if exists public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int
+);
+
+CREATE OR REPLACE FUNCTION book_pooled_ride(
+  p_ride_id UUID,
+  p_passenger_id UUID,
+  p_pickup_lat NUMERIC,
+  p_pickup_lng NUMERIC,
+  p_pickup_label TEXT,
+  p_dropoff_lat NUMERIC,
+  p_dropoff_lng NUMERIC,
+  p_dropoff_label TEXT,
+  p_seats_requested INT, -- = party_size: ONE booking for the whole party
+  p_max_co_passengers INT,
+  p_party_member_names TEXT[] DEFAULT NULL
+)
+RETURNS TABLE (
+  booking_id UUID,
+  success BOOLEAN,
+  reason TEXT,
+  remaining_seats INT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_ride RECORD;
+  v_existing_booking RECORD;
+  v_current_people INT;
+  v_host_persons INT;
+  v_proposed_count INT;
+  v_total_riders INT;
+  v_new_booking_id UUID;
+  v_status TEXT;
+  v_reason TEXT;
+  v_role TEXT;
+  v_expires_at TIMESTAMPTZ;
+  v_joiner_name TEXT;
+  v_joiner_label TEXT;
+  v_party_names TEXT[];
+  v_voter RECORD;
+BEGIN
+  SELECT * INTO v_ride
+  FROM rides
+  WHERE id = p_ride_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'RIDE_NOT_FOUND', NULL::INT;
+    RETURN;
+  END IF;
+
+  IF v_ride.status != 'active' THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'RIDE_NOT_ACTIVE', NULL::INT;
+    RETURN;
+  END IF;
+
+  -- PEOPLE, not bookings: every active booking reserves
+  -- seats_requested = its party's size (pending / pending_consent
+  -- included — reserved seats count toward occupancy).
+  SELECT COALESCE(SUM(seats_requested), 0) INTO v_current_people
+  FROM ride_bookings
+  WHERE ride_id = p_ride_id AND status IN ('accepted', 'pending', 'pending_consent');
+
+  -- Host slot = driver (car_pool) or booker (ride_hail_share), counting
+  -- as 1 person — unless that user holds an active booking themselves,
+  -- in which case their party booking's seats_requested already counts
+  -- them as its lead and the slot adds nothing.
+  SELECT CASE WHEN EXISTS (
+    SELECT 1 FROM ride_bookings rb
+    WHERE rb.ride_id = p_ride_id
+      AND rb.status IN ('accepted', 'pending', 'pending_consent')
+      AND rb.passenger_id = COALESCE(v_ride.driver_id, v_ride.booked_by)
+  ) THEN 0 ELSE 1 END INTO v_host_persons;
+
+  v_proposed_count := v_current_people + p_seats_requested; -- total people excluding the host slot
+  v_total_riders := v_proposed_count + v_host_persons;     -- everyone in the car after this join
+
+  -- 1. Driver Cap (people)
+  IF v_ride.driver_max_co_passengers IS NOT NULL AND v_proposed_count > v_ride.driver_max_co_passengers THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'DRIVER_CAP_EXCEEDED', GREATEST(v_ride.available_seats, 0);
+    RETURN;
+  END IF;
+
+  -- 2. Candidate Passenger Cap (people)
+  IF p_max_co_passengers IS NOT NULL AND p_max_co_passengers != -1 AND v_proposed_count > p_max_co_passengers THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'PASSENGER_CAP_EXCEEDED', GREATEST(v_ride.available_seats, 0);
+    RETURN;
+  END IF;
+
+  -- 3. Existing Passengers' Caps ("most restrictive passenger wins", people)
+  FOR v_existing_booking IN
+    SELECT max_co_passengers
+    FROM ride_bookings
+    WHERE ride_id = p_ride_id AND status IN ('accepted', 'pending', 'pending_consent')
+  LOOP
+    IF v_existing_booking.max_co_passengers IS NOT NULL
+       AND v_existing_booking.max_co_passengers != -1
+       AND v_proposed_count > v_existing_booking.max_co_passengers THEN
+      RETURN QUERY SELECT NULL::UUID, FALSE, 'EXISTING_PASSENGER_CAP_VIOLATED', GREATEST(v_ride.available_seats, 0);
+      RETURN;
+    END IF;
+  END LOOP;
+
+  -- 4. Seat Availability (available_seats = total_seats - SUM(reserved seats),
+  --    maintained by the decrements below). A solo rider still sees the
+  --    original INSUFFICIENT_SEATS code; a PARTY that simply doesn't fit
+  --    gets the new PARTY_TOO_LARGE_FOR_REMAINING_SEATS with the seat
+  --    count it needs to show the user.
+  IF v_ride.available_seats < p_seats_requested THEN
+    IF p_seats_requested > 1 THEN
+      RETURN QUERY SELECT NULL::UUID, FALSE, 'PARTY_TOO_LARGE_FOR_REMAINING_SEATS', GREATEST(v_ride.available_seats, 0);
+    ELSE
+      RETURN QUERY SELECT NULL::UUID, FALSE, 'INSUFFICIENT_SEATS', GREATEST(v_ride.available_seats, 0);
+    END IF;
+    RETURN;
+  END IF;
+
+  -- 3+ TOTAL PEOPLE (host + everyone booked, pending parties included)
+  -- requires dual consent from driver + primary rider. A party of 2
+  -- joining a driver-only car makes 3 people, so it lands here too.
+  -- 2 people (host + one solo passenger) auto-accepts as before.
+  IF v_total_riders >= 3 THEN
+    v_status := 'pending_consent';
+    v_reason := 'AWAITING_GROUP_CONSENT';
+    v_role := 'passenger_joiner';
+    v_expires_at := now() + interval '30 minutes';
+  ELSE
+    v_status := 'accepted';
+    v_reason := 'SUCCESS';
+    v_role := 'host_rider';
+    v_expires_at := NULL;
+  END IF;
+
+  v_party_names := COALESCE(p_party_member_names, '{}'::text[]);
+  IF array_length(v_party_names, 1) > 3 THEN
+    v_party_names := v_party_names[1:3]; -- defensive; the CHECK caps at 3 too
+  END IF;
+
+  INSERT INTO ride_bookings (
+    ride_id, passenger_id, pickup_lat, pickup_lng, pickup_label,
+    dropoff_lat, dropoff_lng, dropoff_label, seats_requested, max_co_passengers,
+    role, status, expires_at, party_member_names
+  ) VALUES (
+    p_ride_id, p_passenger_id, p_pickup_lat, p_pickup_lng, p_pickup_label,
+    p_dropoff_lat, p_dropoff_lng, p_dropoff_label, p_seats_requested, p_max_co_passengers,
+    v_role, v_status, v_expires_at, v_party_names
+  ) RETURNING id INTO v_new_booking_id;
+
+  -- Reserve seats immediately either way (declines restore them below).
+  UPDATE rides
+  SET available_seats = available_seats - p_seats_requested
+  WHERE id = p_ride_id;
+
+  -- Designate the primary rider on the 1:1 auto-accept, if unset.
+  IF v_status = 'accepted' AND v_ride.primary_rider_id IS NULL THEN
+    UPDATE rides SET primary_rider_id = p_passenger_id WHERE id = p_ride_id;
+  END IF;
+
+  SELECT display_name INTO v_joiner_name FROM users WHERE id = p_passenger_id;
+  v_joiner_name := COALESCE(v_joiner_name, 'A rider');
+  v_joiner_label := v_joiner_name ||
+    CASE WHEN p_seats_requested > 1
+         THEN ' (party of ' || p_seats_requested || ')'
+         ELSE '' END;
+
+  IF v_status = 'pending_consent' THEN
+    -- DUAL CONSENT: exactly two approvers, driver + primary rider,
+    -- de-duplicated, nulls skipped.
+    INSERT INTO ride_consents (ride_id, booking_id, rider_id, status)
+    SELECT DISTINCT p_ride_id, v_new_booking_id, approver.rid, 'awaiting'
+    FROM (
+      SELECT v_ride.driver_id AS rid
+      UNION ALL
+      SELECT v_ride.primary_rider_id
+    ) approver
+    WHERE approver.rid IS NOT NULL;
+
+    -- Notify each approver that a vote is waiting.
+    FOR v_voter IN
+      SELECT rc.rider_id FROM ride_consents rc WHERE rc.booking_id = v_new_booking_id
+    LOOP
+      INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+      VALUES (
+        v_voter.rider_id,
+        'consent_requested',
+        'Approval needed',
+        v_joiner_label || ' wants to join your shared ride. The driver and primary rider must both approve.',
+        p_ride_id,
+        v_new_booking_id
+      );
+    END LOOP;
+
+    -- The joiner sees their own request as pending in their feed (no vote).
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    VALUES (
+      p_passenger_id,
+      'consent_requested',
+      'Request sent',
+      'Your request to join was sent and is awaiting host approval.',
+      p_ride_id,
+      v_new_booking_id
+    );
+
+    -- Read-only notice to every OTHER accepted rider (not an approver):
+    -- their ride is changing, but they don't vote.
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    SELECT rb.passenger_id, 'ride_update', 'A rider asked to join',
+           v_joiner_label || ' asked to join your ride. The hosts are reviewing it.',
+           p_ride_id, v_new_booking_id
+    FROM ride_bookings rb
+    WHERE rb.ride_id = p_ride_id
+      AND rb.status = 'accepted'
+      AND rb.id != v_new_booking_id
+      AND rb.passenger_id <> v_ride.driver_id
+      AND rb.passenger_id <> v_ride.primary_rider_id;
+  END IF;
+
+  RETURN QUERY SELECT v_new_booking_id, TRUE, v_reason, v_ride.available_seats - p_seats_requested;
+END;
+$$;
+
+-- Same lockdown as the prior versions, re-asserted for the new signature.
+revoke all on function public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int, text[]
+) from public;
+grant execute on function public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int, text[]
+) to authenticated;
+alter function public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int, text[]
+) security definer set search_path = public;
+
+-- ─────────────────────────────────────────────────────────────
+-- 4. get_ride_occupancy(ride_id): live occupancy in PEOPLE.
+--    total_people_capacity = total_seats + 1 for car_pool (passenger
+--    seats + the driver); = total_seats for ride_hail_share (the booker
+--    declared the cab's total people capacity, everyone aboard
+--    including the booker's party is a "passenger seat" user).
+--    occupied_people = host slot + SUM(reserved seats), per the
+--    DEFINITIONS above. seats_left never goes negative. status is
+--    'open' while seats_left > 0, else 'full'.
+--    co_riders[] = the people aboard or reserved: the host slot (only
+--    when they hold no booking of their own) plus every active booking
+--    with its party. Redaction mirrors get_ride_participants: in
+--    ride_hail_share, a joiner's name / party_size / party_member_names
+--    are hidden from non-host viewers ("Fellow rider"); hosts and the
+--    joiner themself always see full details; car_pool never redacts.
+--    Only ride participants may call this (0 rows otherwise) — the
+--    same is_ride_participant gate the RLS policies use.
+-- ─────────────────────────────────────────────────────────────
+create or replace function public.get_ride_occupancy(
+  p_ride_id uuid,
+  p_viewer_id uuid default public.current_user_id()
+)
+returns table (
+  ride_id uuid,
+  total_people_capacity int,
+  occupied_people int,
+  seats_left int,
+  status text,
+  co_riders jsonb
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with r as (
+    select id, driver_id, primary_rider_id, booked_by, ride_mode, total_seats
+    from public.rides
+    where id = p_ride_id
+  ),
+  active as (
+    select rb.passenger_id, rb.role, rb.status, rb.seats_requested,
+           rb.party_member_names, rb.created_at
+    from public.ride_bookings rb
+    where rb.ride_id = p_ride_id
+      and rb.status in ('accepted', 'pending', 'pending_consent')
+  ),
+  hostslot as (
+    select
+      coalesce(r.driver_id, r.booked_by) as host_id,
+      case when exists (
+        select 1 from active a
+        where a.passenger_id = coalesce(r.driver_id, r.booked_by)
+      ) then 0 else 1 end as host_persons
+    from r
+  ),
+  counts as (
+    select
+      coalesce((select sum(seats_requested) from active), 0)::int as current_people,
+      (case when r.ride_mode = 'ride_hail_share'
+            then r.total_seats
+            else r.total_seats + 1 end)::int as capacity,
+      hs.host_persons
+    from r, hostslot hs
+  ),
+  metrics as (
+    select
+      c.capacity as total_people_capacity,
+      (c.host_persons + c.current_people) as occupied_people,
+      greatest(c.capacity - (c.host_persons + c.current_people), 0) as seats_left
+    from counts c
+  ),
+  riders as (
+    select coalesce(jsonb_strip_nulls(jsonb_agg(rid.orderable -> 'entry' order by rid.orderable ->> 'sort_key')), '[]'::jsonb) as co_riders
+    from (
+      -- Host slot row (only when the host isn't represented by their own booking).
+      select jsonb_build_object(
+        'sort_key', '0',
+        'entry', jsonb_build_object(
+          'user_id', hs.host_id,
+          'role', case when r.driver_id is not null then 'host_driver' else 'booker' end,
+          'display_name', u.display_name,
+          'is_verified', coalesce(u.is_verified, false),
+          'party_size', 1,
+          'party_member_names', '[]'::jsonb,
+          'status', 'accepted'
+        )
+      ) as orderable
+      from r, hostslot hs
+      join public.users u on u.id = hs.host_id
+      where hs.host_persons = 1 and hs.host_id is not null
+
+      union all
+
+      -- One entry per active booking (a party = one entry, party_size > 1).
+      select jsonb_build_object(
+        'sort_key', '1',
+        'entry', jsonb_build_object(
+          'user_id', a.passenger_id,
+          'role', coalesce(a.role, 'passenger_joiner'),
+          'display_name', case when m.mask then 'Fellow rider' else u.display_name end,
+          'is_verified', coalesce(u.is_verified, false),
+          'party_size', case when m.mask then null else a.seats_requested end,
+          'party_member_names', case when m.mask then null else to_jsonb(coalesce(a.party_member_names, '{}'::text[])) end,
+          'status', a.status
+        )
+      ) as orderable
+      from active a
+      join public.users u on u.id = a.passenger_id
+      cross join r
+      cross join lateral (
+        select (
+          r.ride_mode = 'ride_hail_share'
+          and coalesce(a.role, 'passenger_joiner') = 'passenger_joiner'
+          and a.passenger_id <> p_viewer_id
+          and not (
+            p_viewer_id = r.driver_id
+            or p_viewer_id = r.primary_rider_id
+            or (r.booked_by is not null and p_viewer_id = r.booked_by)
+          )
+        ) as mask
+      ) m
+    ) rid
+  )
+  select r.id, mt.total_people_capacity, mt.occupied_people, mt.seats_left,
+         case when mt.seats_left > 0 then 'open' else 'full' end,
+         rd.co_riders
+  from r, metrics mt, riders rd
+  where public.is_ride_participant(p_ride_id, p_viewer_id);
+$$;
+
+revoke all on function public.get_ride_occupancy(uuid, uuid) from public;
+grant execute on function public.get_ride_occupancy(uuid, uuid) to authenticated;

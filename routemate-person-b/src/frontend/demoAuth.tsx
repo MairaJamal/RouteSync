@@ -6,7 +6,7 @@
    Login / signup UI (AuthScreen) uses signIn / signUp here. Tokens are
    cached in memory for the tab session; getAuthToken reads the active
    Supabase session rather than silently signing in a demo user. */
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { Gender } from "../types";
 import { UserRole } from "./LocationSearchForm";
 import { API_URL } from "./apiBase";
@@ -66,7 +66,7 @@ function metadataName(user: { email?: string | null; user_metadata?: Record<stri
   return user.email?.split("@")[0] || "RouteSync User";
 }
 
-let client: ReturnType<typeof createClient> | null = null;
+let client: SupabaseClient | null = null;
 function getClient() {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     throw new Error(
@@ -92,7 +92,10 @@ async function loadProfileForAuthUser(
   preferredRole: UserRole = "LOOKING"
 ): Promise<AuthUserSession> {
   const supabase = getClient();
-  async function findProfile(filterColumn: "auth_user_id" | "id", filterValue: string) {
+  async function findProfile(
+    filterColumn: "auth_user_id" | "id",
+    filterValue: string
+  ): Promise<Record<string, any> | null> {
     const full = await supabase
       .from("users")
       .select("id, display_name, gender, is_verified, verified_domain")
@@ -240,13 +243,23 @@ export async function signIn(email: string, password: string): Promise<AuthUserS
   );
 }
 
-/** Persist the user's latest passenger/driver choice for the next session. */
+/** Persists the driver/passenger toggle on the user's auth metadata so
+ *  the search form starts next time in the mode the user actually used.
+ *  Without this, a driver who searched as "Offering a Ride" would
+ *  silently reset to "Looking for a Ride" on every reload — turning
+ *  their offer into a passenger search (and showing their own trip
+ *  back to them as someone else's offer). Best-effort: a failed write
+ *  only means the next form opens at the signup default. */
 export async function rememberPreferredRole(role: UserRole): Promise<void> {
   try {
-    const { error } = await getClient().auth.updateUser({ data: { preferred_role: role } });
-    if (error) console.warn("[RouteSync] Could not save preferred ride role:", error.message);
-  } catch (error) {
-    console.warn("[RouteSync] Could not save preferred ride role:", error);
+    const supabase = getClient();
+    const { error } = await supabase.auth.updateUser({ data: { preferred_role: role } });
+    if (error) {
+      // eslint-disable-next-line no-console
+      console.warn("[RouteSync] could not remember search role:", error.message);
+    }
+  } catch {
+    /* non-fatal — the search itself already succeeded */
   }
 }
 
@@ -376,6 +389,7 @@ export async function signOut(): Promise<void> {
 
 /** Returns a valid access token from the active session. */
 export async function getAuthToken(): Promise<string> {
+  if (cachedToken) return cachedToken;
   if (inFlight) return inFlight;
 
   inFlight = (async () => {
@@ -395,22 +409,6 @@ export async function getAuthToken(): Promise<string> {
   }
 }
 
-/** Force-refresh the refresh-token session after the API rejects a token. */
-async function refreshAuthToken(): Promise<string | null> {
-  try {
-    const { data, error } = await getClient().auth.refreshSession();
-    if (error || !data.session?.access_token) {
-      cachedToken = null;
-      return null;
-    }
-    cachedToken = data.session.access_token;
-    return cachedToken;
-  } catch {
-    cachedToken = null;
-    return null;
-  }
-}
-
 /** Convenience wrapper: fetch() with the signed-in user's Authorization header
  *  already attached. Falls through to a normal, unauthenticated fetch
  *  with a console warning if sign-in fails, rather than hard-crashing the
@@ -426,16 +424,7 @@ export async function authedFetch(url: string, init: RequestInit = {}): Promise<
       err instanceof Error ? err.message : err
     );
   }
-  const requestWithToken = (accessToken: string | null) => {
-    const headers = new Headers(init.headers ?? {});
-    if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
-    return fetch(url, { ...init, headers });
-  };
-
-  let response = await requestWithToken(token);
-  if (response.status === 401) {
-    const refreshed = await refreshAuthToken();
-    if (refreshed) response = await requestWithToken(refreshed);
-  }
-  return response;
+  const headers = new Headers(init.headers ?? {});
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return fetch(url, { ...init, headers });
 }
