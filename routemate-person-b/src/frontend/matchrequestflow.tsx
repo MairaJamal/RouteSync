@@ -690,11 +690,15 @@ export default function MatchRequestsPanel({
     const payload = await postJson(`${API_URL}/api/match-requests/${r.id}/finalize`, { decision: "confirm" });
     if (!payload) return;
     const request = payload.request as MatchRequestView;
-    const chatId = payload.chat_id as string;
+    // Prefer the finalize response, but retain the serialized request value
+    // as a fallback so a valid confirmation can still open its chat if an
+    // older API response omitted the top-level field.
+    const chatId = (payload.chat_id ?? request?.chat_id) as string | null;
     await refresh();
     // The server folded this pairing into the car's own ride row (one per
     // car, owned by whoever hosts it) — the UI must not mint a second one.
     if (request && chatId) onConfirmed(request, chatId, payload.ride_id ?? null);
+    else if (request) setError("Ride confirmed, but the chat thread was not returned. Please refresh and try again.");
   }
 
   // Confirmed requests are surfaced as the chat the server created on
