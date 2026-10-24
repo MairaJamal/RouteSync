@@ -1921,7 +1921,9 @@ matchesRouter.get(
           "id, ride_id, status, pickup_label, dropoff_label, created_at, rides(id, status, origin_label, destination_label, departure_time, updated_at, created_at)"
         )
         .eq("passenger_id", profileId)
-        .in("status", ["accepted", "completed", "pending"])
+        // Pending requests are not rides yet: they have not been accepted
+        // and must not inflate the dashboard's "Completed + active" count.
+        .in("status", ["accepted", "completed"])
         .order("created_at", { ascending: false })
         .limit(40);
 
