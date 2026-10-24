@@ -8,9 +8,7 @@ import { searchPlaces, PlaceSuggestion, isWithinServiceArea, SERVICE_AREA_LABEL 
 import { LocationPoint, Gender, GenderPreference } from "../types";
 import InteractiveMapPicker from "./InteractiveMapPicker";
 import CoPassengerPicker, { CO_PASSENGER_OPTIONS } from "./CoPassengerPicker";
-import { isValidVehiclePlate } from "../vehicleDeclaration";
-import { API_URL } from "./apiBase";
-import { authedFetch } from "./demoAuth";
+import { isValidPakistaniCnic, isValidVehiclePlate, normalizeCnic } from "../vehicleDeclaration";
 
 
 interface FieldState {
@@ -309,7 +307,6 @@ export default function LocationSearchForm({
   currentUserGender,
   initialUserRole = "LOOKING",
   onRoleChange,
-  userId,
 }: {
   onSubmit: (value: TripSearchValue) => void;
   defaultMaxCoPassengers?: number;
@@ -317,8 +314,6 @@ export default function LocationSearchForm({
   /** Prefill from signup (driver vs passenger). */
   initialUserRole?: UserRole;
   onRoleChange?: (role: UserRole) => void;
-  /** Signed-in profile used to restore the saved driver vehicle declaration. */
-  userId?: string;
 }) {
   const [pickup, setPickup] = useState<FieldState>(emptyField);
   const [dropoff, setDropoff] = useState<FieldState>(emptyField);
@@ -341,44 +336,13 @@ export default function LocationSearchForm({
   const [seatsAvailable, setSeatsAvailable] = useState<number>(2);
   const [vehiclePlate, setVehiclePlate] = useState("");
   const [vehicleMakeModel, setVehicleMakeModel] = useState("");
-  const [savedVehicleDetails, setSavedVehicleDetails] = useState<{
-    plate: string;
-    makeModel: string;
-  } | null>(null);
-  const [editingVehicleDetails, setEditingVehicleDetails] = useState(false);
-  const [vehicleDetailsLoading, setVehicleDetailsLoading] = useState(false);
+  // OFFERING-only — normally the CNIC comes from signup; this lets an
+  // account that never stored one (signup predating the CNIC step, or a
+  // failed identity save) supply it inline. The server remembers it after
+  // the first successful declaration, so it's a one-time entry.
+  const [vehicleCnic, setVehicleCnic] = useState("");
   const [showMap, setShowMap] = useState<boolean>(false);
   const [mapTargetMode, setMapTargetMode] = useState<"pickup" | "dropoff">("pickup");
-
-  useEffect(() => {
-    if (!userId) return;
-    let cancelled = false;
-    setVehicleDetailsLoading(true);
-    authedFetch(`${API_URL}/api/users/${userId}/vehicle-declaration`)
-      .then(async (res) => {
-        if (!res.ok) return;
-        const payload = await res.json().catch(() => null);
-        if (!cancelled && payload?.declared && payload.vehicle_plate) {
-          const details = {
-            plate: String(payload.vehicle_plate),
-            makeModel: String(payload.vehicle_make_model ?? ""),
-          };
-          setSavedVehicleDetails(details);
-          setVehiclePlate(details.plate);
-          setVehicleMakeModel(details.makeModel);
-          setEditingVehicleDetails(false);
-        }
-      })
-      .catch(() => {
-        // Keep the editable fields available if the optional migration is absent.
-      })
-      .finally(() => {
-        if (!cancelled) setVehicleDetailsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [userId]);
 
   const rideHailingFarePkr = Number(rideHailingFareInput);
   const rideHailingFareValid = rideHailingFareInput.trim() !== "" && rideHailingFarePkr > 0;
@@ -398,6 +362,10 @@ export default function LocationSearchForm({
   const offeringVehicleOk =
     userRole !== "OFFERING" ||
     (isValidVehiclePlate(vehiclePlate) && vehicleMakeModel.trim().length >= 2);
+  // CNIC is optional here (it usually comes from signup) — but if typed,
+  // it must be valid, otherwise the server rejects the whole search.
+  const cnicProvided = vehicleCnic.trim().length > 0;
+  const offeringCnicOk = !cnicProvided || isValidPakistaniCnic(vehicleCnic);
 
   const canSubmit =
     !!pickup.selected &&
@@ -405,7 +373,8 @@ export default function LocationSearchForm({
     !pickupOutOfRegion &&
     !dropoffOutOfRegion &&
     (vehicleType !== "ride_hailing" || rideHailingFareValid) &&
-    offeringVehicleOk;
+    offeringVehicleOk &&
+    offeringCnicOk;
 
   /** Switching roles resets every option that belongs to the other mode:
    *  the "require female driver" filter and the cab-split fare are
@@ -800,52 +769,8 @@ export default function LocationSearchForm({
               </span>
               <p style={{ margin: 0, fontSize: "12px", color: "var(--rm-ink-soft)", lineHeight: 1.4 }}>
                 Plate and make/model are shown to passengers. Your CNIC from signup is reused
-                privately and never shown on match cards.
+                privately and never shown on match cards — only its last 4 digits stay on record.
               </p>
-              {vehicleDetailsLoading && (
-                <span style={{ fontSize: "12px", color: "var(--rm-ink-soft)" }}>
-                  Loading your saved vehicle details…
-                </span>
-              )}
-              {savedVehicleDetails && !editingVehicleDetails ? (
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: "10px",
-                    padding: "10px 12px",
-                    border: "1px solid var(--rm-border)",
-                    borderRadius: "8px",
-                    background: "var(--rm-paper)",
-                  }}
-                >
-                  <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
-                    <span style={{ fontSize: "13px", fontWeight: 600, color: "var(--rm-ink)" }}>
-                      {savedVehicleDetails.plate}
-                    </span>
-                    <span style={{ fontSize: "12px", color: "var(--rm-ink-soft)" }}>
-                      {savedVehicleDetails.makeModel || "Vehicle details saved"} · reused for this offer
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setEditingVehicleDetails(true)}
-                    style={{
-                      padding: "6px 9px",
-                      border: "1px solid var(--rm-border)",
-                      borderRadius: "6px",
-                      background: "transparent",
-                      color: "var(--rm-ink)",
-                      fontSize: "11px",
-                      cursor: "pointer",
-                    }}
-                  >
-                    Edit
-                  </button>
-                </div>
-              ) : (
-                <>
               <div>
                 <label
                   style={{
@@ -902,8 +827,41 @@ export default function LocationSearchForm({
                   }}
                 />
               </div>
-                </>
-              )}
+              <div>
+                <label
+                  style={{
+                    display: "block",
+                    fontSize: "12px",
+                    color: "var(--rm-ink)",
+                    marginBottom: "4px",
+                  }}
+                >
+                  CNIC <span style={{ color: "var(--rm-ink-soft)", fontWeight: 400 }}>(only if you didn&apos;t add it at signup)</span>
+                </label>
+                <input
+                  value={vehicleCnic}
+                  onChange={(e) => setVehicleCnic(e.target.value)}
+                  placeholder="12345-1234567-1"
+                  inputMode="numeric"
+                  maxLength={15}
+                  style={{
+                    width: "100%",
+                    boxSizing: "border-box",
+                    padding: "10px 12px",
+                    borderRadius: "8px",
+                    border: `1px solid ${!offeringCnicOk ? "var(--rm-danger)" : "var(--rm-border)"}`,
+                    background: "var(--rm-paper-raised)",
+                    color: "var(--rm-ink)",
+                    fontFamily: "var(--rm-font-body)",
+                    fontSize: "14px",
+                  }}
+                />
+                {!offeringCnicOk && (
+                  <span style={{ display: "block", marginTop: "4px", fontSize: "11px", color: "var(--rm-danger)" }}>
+                    Enter your CNIC in the format 12345-1234567-1, or leave it empty to use the one from signup.
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         ) : (
@@ -1127,6 +1085,7 @@ export default function LocationSearchForm({
             vehicleDeclaration:
               userRole === "OFFERING"
                 ? {
+                    cnic: cnicProvided ? normalizeCnic(vehicleCnic) : undefined,
                     plate: vehiclePlate.trim(),
                     makeModel: vehicleMakeModel.trim(),
                   }
@@ -1151,6 +1110,23 @@ export default function LocationSearchForm({
       >
         {userRole === "OFFERING" ? "POST A RIDE" : "FIND A RIDE MATCH"}
       </button>
+
+      {/* The button above silently disables until the driver's plate and
+          make/model are filled in — without this line there is no hint of
+          what is missing, and a posted offer just appears to do nothing. */}
+      {userRole === "OFFERING" && !offeringVehicleOk && (
+        <p
+          style={{
+            margin: "-4px 0 0",
+            fontSize: "11px",
+            color: "var(--rm-ink-soft)",
+            lineHeight: 1.4,
+          }}
+        >
+          Add your plate number and make / model above to post the ride — passengers see both on your
+          offer, and a ride can&apos;t be posted without them.
+        </p>
+      )}
     </div>
   );
 }

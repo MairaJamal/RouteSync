@@ -238,6 +238,20 @@ export interface MatchCardSafetyConfig {
   onBlocked?: () => void;
 }
 
+/** Group carpool: the candidate hosts this trip in their own car, and
+ *  `members` are the riders already confirmed into it. When present the
+ *  card renders as ONE unified group — driver as host up top, existing
+ *  co-riders in a secondary row, and a "join the group" CTA — instead of
+ *  a lone rider profile. */
+export interface MatchCardGroupInfo {
+  hostUserId: string;
+  hostDisplayName: string;
+  members: { userId: string; displayName: string }[];
+  /** Riders with an open (not yet confirmed) join request for this car.
+   *  Listed but not counted in "N in this car" — they haven't joined yet. */
+  pendingMembers?: { userId: string; displayName: string }[];
+}
+
 /** Day 8/11: marks a match as owner/passenger, or a shared
  *  ride-hailing split — shown instead of WomenOnlyBadge's neighbor
  *  spot so a rider immediately knows what kind of trip this is. */
@@ -319,6 +333,12 @@ export interface MatchCardProps {
   candidateRating?: RatingSummary | null;
   candidatePreference?: "any" | "male_only" | "female_only";
   safety?: MatchCardSafetyConfig;
+  /** Set when this match is a carpool group hosted by the candidate. */
+  group?: MatchCardGroupInfo | null;
+  /** Two-sided approval: set while an outgoing request to this candidate
+   *  is still open — replaces the Send Request / Pass buttons with the
+   *  status box so the action can't be fired twice. */
+  requestStatus?: "pending" | "awaiting_requester" | null;
   onAccept: () => void;
   onReject: () => void;
   onOpenChat?: () => void;
@@ -349,6 +369,8 @@ export default function MatchCard({
   candidateRating = null,
   candidatePreference = "any",
   safety,
+  group = null,
+  requestStatus = null,
   onAccept,
   onReject,
   onOpenChat,
@@ -357,6 +379,8 @@ export default function MatchCard({
   const isConfirmed = status === "confirmed";
   const [showMap, setShowMap] = useState(false);
   const hasMapData = Boolean(routeGeometry?.combined);
+  // In a group card the driver is the primary host — their name leads.
+  const hostName = group?.hostDisplayName || candidateDisplayName;
 
   return (
     <div
@@ -374,7 +398,20 @@ export default function MatchCard({
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "10px" }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: "15px", fontWeight: 600, color: "var(--rm-ink)" }}>
-            {candidateDisplayName}{" "}
+            {hostName}{" "}
+            {group && (
+              <span
+                style={{
+                  fontFamily: "var(--rm-font-display)",
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  color: "var(--rm-route-green)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                · car owner
+              </span>
+            )}{" "}
             {candidateIsVerified && <VerifiedBadge domain={candidateVerifiedDomain} compact />}{" "}
             {isConfirmed && (
               <span style={{ fontSize: "11px", color: "var(--rm-route-green)", fontFamily: "var(--rm-font-display)" }}>
@@ -395,7 +432,7 @@ export default function MatchCard({
           </div>
           {(ownerVehicleDeclared || ownerVehiclePlate || ownerVehicleMakeModel) && (
             <div style={{ fontSize: "12px", color: "var(--rm-ink-soft)", marginTop: "3px" }}>
-              Self-declared:{" "}
+              {group ? "Driving" : "Self-declared"}:{" "}
               <strong style={{ color: "var(--rm-ink)" }}>
                 {[ownerVehiclePlate, ownerVehicleMakeModel].filter(Boolean).join(" · ") || "Vehicle on file"}
               </strong>
@@ -415,6 +452,51 @@ export default function MatchCard({
           )}
         </div>
       </div>
+
+      {group && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            flexWrap: "wrap",
+            fontSize: "12px",
+            color: "var(--rm-ink)",
+            background: "var(--rm-paper)",
+            border: "1px solid var(--rm-border)",
+            borderRadius: "8px",
+            padding: "8px 10px",
+          }}
+        >
+          <span
+            style={{
+              fontFamily: "var(--rm-font-display)",
+              fontSize: "10px",
+              fontWeight: 600,
+              padding: "2px 7px",
+              borderRadius: "999px",
+              background: "#d7ecdf",
+              border: "1px solid var(--rm-route-green)",
+              color: "#0e3d24",
+              whiteSpace: "nowrap",
+            }}
+          >
+            👥 {group.members.length + 1} in this car
+          </span>
+          {group.members.length > 0 ? (
+            <span>
+              {group.members.map((m) => m.displayName).join(", ")}{" already riding — you'd join them"}
+            </span>
+          ) : (
+            <span>No co-riders yet — you'd be the first to join {hostName.split(" ")[0]}'s car</span>
+          )}
+          {(group.pendingMembers?.length ?? 0) > 0 && (
+            <span style={{ color: "var(--rm-ink-soft)" }}>
+              · {group.pendingMembers!.map((m) => m.displayName).join(", ")} requested to join
+            </span>
+          )}
+        </div>
+      )}
 
       <RouteBar legs={legs} />
 
@@ -529,6 +611,30 @@ export default function MatchCard({
             💬 Open Chat & Contact
           </button>
         </div>
+      ) : requestStatus ? (
+        <div
+          style={{
+            fontFamily: "var(--rm-font-body)",
+            fontSize: "12px",
+            color: "var(--rm-ink)",
+            background: "var(--rm-paper)",
+            border: "1px dashed var(--rm-border)",
+            borderRadius: "8px",
+            padding: "10px 12px",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+          }}
+        >
+          {requestStatus === "pending" ? (
+            <>
+              ⏳ {group ? "Join request sent" : "Request sent"} — waiting for{" "}
+              {group ? `${hostName}'s group` : candidateDisplayName} to respond
+            </>
+          ) : (
+            <>✅ {candidateDisplayName} accepted — confirm in your ride requests</>
+          )}
+        </div>
       ) : (
         <div style={{ display: "flex", gap: "10px" }}>
           <button
@@ -548,7 +654,7 @@ export default function MatchCard({
               cursor: "pointer",
             }}
           >
-            Accept Ride
+            {group ? "Request to Join Group" : "Send Request"}
           </button>
           <button
             onClick={onReject}
@@ -574,4 +680,3 @@ export default function MatchCard({
     </div>
   );
 }
-

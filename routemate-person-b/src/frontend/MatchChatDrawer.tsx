@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import VerifiedBadge from "./VerifiedBadge";
 import TripSharePanel from "./TripSharePanel";
+import RideGroupPanel from "./RideGroupPanel";
 import SafetyMenu from "./SafetyMenu";
 import { co2SavedSummary } from "../carbonImpact";
 import { API_URL } from "./apiBase";
@@ -67,13 +68,8 @@ export default function MatchChatDrawer({
   const [input, setInput] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
-  const [activeChatId, setActiveChatId] = useState(match.chatId);
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const chatId = activeChatId;
-
-  useEffect(() => {
-    setActiveChatId(match.chatId);
-  }, [match.chatId]);
+  const chatId = match.chatId;
 
   async function refreshMessages(opts?: { quiet?: boolean }) {
     if (!chatId || !currentUserId) return;
@@ -143,8 +139,7 @@ export default function MatchChatDrawer({
     setLoadError(null);
 
     try {
-      let sendChatId = chatId;
-      let res = await authedFetch(
+      const res = await authedFetch(
         `${API_URL}/api/match-chats/${encodeURIComponent(chatId)}/messages`,
         {
           method: "POST",
@@ -152,38 +147,6 @@ export default function MatchChatDrawer({
           body: JSON.stringify({ user_id: currentUserId, text }),
         }
       );
-
-      // A previously issued thread ID may predate a deployment or belong to
-      // an instance whose ephemeral store disappeared. Recreate it from the
-      // confirmed match instead of asking the user to accept again.
-      if (!res.ok && res.status === 404 && candidateUserId) {
-        const recovered = await authedFetch(`${API_URL}/api/match-chats`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            my_user_id: currentUserId,
-            my_display_name: "You",
-            peer_user_id: candidateUserId,
-            peer_display_name: match.candidateDisplayName,
-            origin_label: match.candidateSectorFrom,
-            destination_label: match.candidateSectorTo,
-            fare_share_pkr: match.fareSharePKR,
-          }),
-        });
-        if (recovered.ok) {
-          const payload = await recovered.json();
-          sendChatId = payload.chat_id;
-          setActiveChatId(sendChatId);
-          res = await authedFetch(
-            `${API_URL}/api/match-chats/${encodeURIComponent(sendChatId)}/messages`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ user_id: currentUserId, text }),
-            }
-          );
-        }
-      }
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.details ?? body?.error ?? `HTTP ${res.status}`);
@@ -336,6 +299,18 @@ export default function MatchChatDrawer({
           );
         })()}
 
+        {safety?.rideId && (
+          <div
+            style={{
+              padding: "12px 16px",
+              borderBottom: "1px solid var(--rm-border)",
+              background: "var(--rm-paper)",
+            }}
+          >
+            <RideGroupPanel rideId={safety.rideId} currentUserId={currentUserId} />
+          </div>
+        )}
+
         <div style={{ borderBottom: "1px solid var(--rm-border)", background: "var(--rm-paper)" }}>
           <button
             type="button"
@@ -363,7 +338,7 @@ export default function MatchChatDrawer({
 
           {safetyOpen && (
             <div style={{ padding: "0 16px 14px", display: "flex", flexDirection: "column", gap: "10px" }}>
-              <TripSharePanel />
+              <TripSharePanel rideId={safety?.rideId ?? null} />
               {safety && candidateUserId && (
                 <div
                   style={{

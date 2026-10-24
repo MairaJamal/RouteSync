@@ -2,7 +2,7 @@ import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 
 async function testConnections() {
-  console.log("=== Testing RouteMate Supabase & System Connectivity ===\n");
+  console.log("=== Testing RouteSync Supabase & System Connectivity ===\n");
 
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;

@@ -1,9 +1,15 @@
 /* Day 7 Feature 4: "Rate your trip" modal, opened after a ride is
    completed. Stars 1-5 (hard constraint in the DB) plus an optional
    comment capped at 500 characters — enforced client-side before the
-   server validates again. */
+   server validates again.
+
+   Low ratings (1-3 stars) additionally surface a "what went wrong?"
+   review prompt and an optional safety report. When the rider picks a
+   reason, the report is filed to POST /api/user-reports alongside the
+   rating — the rating is the primary action, the report is best-effort
+   so a report failure never blocks submitting the stars. */
 import { useState } from "react";
-import { validateRatingInput } from "../safety";
+import { validateRatingInput, REPORT_REASONS } from "../safety";
 import { API_URL } from "./apiBase";
 import { authedFetch } from "./demoAuth";
 
@@ -16,6 +22,19 @@ interface RatingModalProps {
   onRated: () => void;
 }
 
+/** Human labels for the DB report-reason codes. */
+const REASON_LABELS: Record<string, string> = {
+  unsafe_driving: "Unsafe driving",
+  inappropriate_behavior: "Inappropriate behavior",
+  no_show: "Rider didn't show up",
+  other: "Something else",
+};
+
+/** 1-3 stars = a bad experience worth a follow-up + optional complaint. */
+function isLowRating(stars: number): boolean {
+  return stars >= 1 && stars <= 3;
+}
+
 export default function RatingModal({
   rideId,
   raterId,
@@ -26,8 +45,11 @@ export default function RatingModal({
 }: RatingModalProps) {
   const [stars, setStars] = useState(0);
   const [comment, setComment] = useState("");
+  const [reportReason, setReportReason] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  const low = isLowRating(stars);
 
   async function handleSubmit() {
     setError(null);
@@ -43,6 +65,7 @@ export default function RatingModal({
 
     setSubmitting(true);
     try {
+      // 1. The rating is the primary, required action.
       const res = await authedFetch(`${API_URL}/api/ratings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -69,6 +92,27 @@ export default function RatingModal({
         }
         return;
       }
+
+      // 2. Optional safety report for a low rating with a chosen reason.
+      //    Best-effort: a failure here doesn't undo the saved rating.
+      if (low && reportReason) {
+        try {
+          await authedFetch(`${API_URL}/api/user-reports`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              reporter_id: raterId,
+              reported_user_id: ratedUserId,
+              ride_id: rideId,
+              reason: reportReason,
+              details: comment.trim() || null,
+            }),
+          });
+        } catch {
+          // Swallow — the rating succeeded; the complaint simply wasn't filed.
+        }
+      }
+
       onRated();
       onClose();
     } catch {
@@ -95,6 +139,8 @@ export default function RatingModal({
         style={{
           width: "100%",
           maxWidth: "400px",
+          maxHeight: "90vh",
+          overflowY: "auto",
           background: "var(--rm-paper-raised)",
           border: "1px solid var(--rm-border)",
           borderRadius: "calc(var(--rm-radius) + 4px)",
@@ -140,18 +186,72 @@ export default function RatingModal({
           ))}
         </div>
 
+        {/* Low-rating follow-up: encourage a written review + optional complaint */}
+        {low && (
+          <div
+            style={{
+              border: "1px solid var(--rm-danger)",
+              background: "rgba(217, 79, 74, 0.06)",
+              borderRadius: "var(--rm-radius)",
+              padding: "12px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "10px",
+            }}
+          >
+            <div style={{ fontSize: "12.5px", fontWeight: 600, color: "var(--rm-ink)" }}>
+              We're sorry this trip wasn't good. What went wrong?
+            </div>
+
+            <label style={{ display: "flex", flexDirection: "column", gap: "5px", fontSize: "11px", color: "var(--rm-ink-soft)" }}>
+              Report a problem (optional)
+              <select
+                value={reportReason}
+                onChange={(e) => setReportReason(e.target.value)}
+                style={{
+                  padding: "9px 10px",
+                  fontSize: "13px",
+                  fontFamily: "var(--rm-font-body)",
+                  border: "1px solid var(--rm-border)",
+                  borderRadius: "var(--rm-radius)",
+                  outline: "none",
+                  background: "var(--rm-paper)",
+                  color: "var(--rm-ink)",
+                }}
+              >
+                <option value="">— No report, just the rating —</option>
+                {REPORT_REASONS.map((r) => (
+                  <option key={r} value={r}>
+                    {REASON_LABELS[r] ?? r}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {reportReason && (
+              <div style={{ fontSize: "11px", color: "var(--rm-ink-soft)" }}>
+                🛡️ Our safety team will review this along with your rating.
+              </div>
+            )}
+          </div>
+        )}
+
         <textarea
           value={comment}
           onChange={(e) => setComment(e.target.value)}
-          placeholder="Optional comment — what went well, what didn't?"
-          rows={3}
+          placeholder={
+            low
+              ? "Tell us more about what happened (optional, but it really helps)…"
+              : "Optional comment — what went well?"
+          }
+          rows={low ? 4 : 3}
           style={{
             width: "100%",
             boxSizing: "border-box",
             padding: "10px 12px",
             fontSize: "13px",
             fontFamily: "var(--rm-font-body)",
-            border: "1px solid var(--rm-border)",
+            border: low ? "1px solid var(--rm-danger)" : "1px solid var(--rm-border)",
             borderRadius: "var(--rm-radius)",
             resize: "vertical",
             outline: "none",
@@ -201,7 +301,7 @@ export default function RatingModal({
               cursor: stars === 0 ? "not-allowed" : "pointer",
             }}
           >
-            {submitting ? "Saving…" : "Submit rating"}
+            {submitting ? "Saving…" : low && reportReason ? "Submit & report" : "Submit rating"}
           </button>
         </div>
       </div>

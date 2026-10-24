@@ -24,17 +24,58 @@ export function buildGoogleMapsLink(lat: number, lng: number): string {
   return `https://www.google.com/maps?q=${lat.toFixed(6)},${lng.toFixed(6)}`;
 }
 
+/** Google Maps turn-by-turn directions from the rider's current
+ *  position to a station. Walks the "get me there" path a caller needs
+ *  when they're close enough to reach a station on foot or by cab. */
+export function buildPoliceDirectionsLink(
+  fromLat: number,
+  fromLng: number,
+  toLat: number,
+  toLng: number
+): string {
+  return (
+    `https://www.google.com/maps/dir/?api=1`
+    + `&origin=${fromLat.toFixed(6)},${fromLng.toFixed(6)}`
+    + `&destination=${toLat.toFixed(6)},${toLng.toFixed(6)}`
+    + `&travelmode=driving`
+  );
+}
+
+/** tel: deep link. On a phone this opens the dialer pre-filled; on
+ *  desktop it's a no-op the OS may hand to a softphone. Whitespace and
+ *  formatting stripped so iOS/Android dialers parse it reliably. */
+export function buildTelLink(phone: string): string {
+  const digits = phone.replace(/[^0-9+]/g, "");
+  return `tel:${digits}`;
+}
+
+// Pakistan emergency helplines. These are the guaranteed, always-
+// available way to reach police/rescue — they need no location
+// permission, no network, and no third-party API, so the SOS modal
+// surfaces them even when the nearest-station lookup returns nothing.
+//   15   → Police
+//   1122 → Rescue (ambulance / fire / disaster)
+export const POLICE_HELPLINE = "15";
+export const RESCUE_HELPLINE = "1122";
+
 /** wa.me deep links take the phone number with NO "+" and URL-encoded
  *  text. No API key, no account, no gateway — free by construction. */
 export function buildWhatsAppLink(e164Phone: string, message: string): string {
   return `https://wa.me/${e164Phone.replace(/^\+/, "")}?text=${encodeURIComponent(message)}`;
 }
 
-export function buildSosMessage(mapsLink: string, companionName?: string): string {
+export function buildSosMessage(
+  mapsLink: string,
+  companionName?: string,
+  policeStationName?: string
+): string {
   const companion = companionName && companionName.trim().length > 0
     ? ` I'm on a RouteSync trip with ${companionName.trim()}.`
     : "";
-  return `I need help. My current location: ${mapsLink}.${companion}`;
+  const police = policeStationName && policeStationName.trim().length > 0
+    ? ` Nearest police station I could find: ${policeStationName.trim()}.`
+    : "";
+  return `I need help. My current location: ${mapsLink}.${companion}${police}`;
 }
 
 export const REPORT_REASONS: ReportReason[] = [

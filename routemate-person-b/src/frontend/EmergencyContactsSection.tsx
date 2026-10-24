@@ -28,7 +28,7 @@ const inputStyle: CSSProperties = {
   color: "var(--rm-ink)",
 };
 
-export default function EmergencyContactsSection({ userId, onChanged }: { userId: string; onChanged?: () => void }) {
+export default function EmergencyContactsSection({ userId }: { userId: string }) {
   const [contacts, setContacts] = useState<EmergencyContact[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [name, setName] = useState("");
@@ -57,6 +57,18 @@ export default function EmergencyContactsSection({ userId, onChanged }: { userId
         const stored = localStorage.getItem(`rm_contacts_${userId}`);
         if (stored) {
           setContacts(JSON.parse(stored));
+        } else {
+          const initial = [
+            {
+              id: "demo-contact-1",
+              user_id: userId,
+              contact_name: "Amna Khan (Sister)",
+              contact_phone: "+923005550199",
+              created_at: new Date().toISOString(),
+            },
+          ];
+          setContacts(initial);
+          localStorage.setItem(`rm_contacts_${userId}`, JSON.stringify(initial));
         }
       } catch {
         setLoadError("Couldn't load emergency contacts.");
@@ -95,7 +107,6 @@ export default function EmergencyContactsSection({ userId, onChanged }: { userId
         setName("");
         setPhone("");
         await refresh();
-        onChanged?.();
         return;
       }
       const payload = await res.json().catch(() => ({}));
@@ -137,7 +148,6 @@ export default function EmergencyContactsSection({ userId, onChanged }: { userId
       const updated = [...existing, newContact];
       localStorage.setItem(`rm_contacts_${userId}`, JSON.stringify(updated));
       setContacts(updated);
-      onChanged?.();
       setName("");
       setPhone("");
     } catch {
@@ -153,7 +163,6 @@ export default function EmergencyContactsSection({ userId, onChanged }: { userId
       );
       if (res.ok) {
         await refresh();
-        onChanged?.();
         return;
       }
     } catch {
@@ -165,7 +174,6 @@ export default function EmergencyContactsSection({ userId, onChanged }: { userId
       const updated = existing.filter((c: any) => c.id !== id);
       localStorage.setItem(`rm_contacts_${userId}`, JSON.stringify(updated));
       setContacts(updated);
-      onChanged?.();
     } catch {
       setLoadError("Couldn't remove contact.");
     }

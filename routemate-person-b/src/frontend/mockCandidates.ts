@@ -60,6 +60,10 @@ export interface MockCandidate {
   isVerified: boolean;
   verifiedDomain: string | null;
   rating: RatingSummary;
+  /** Riders already confirmed into this owner's car (group carpool).
+   *  Only meaningful when ownsVehicle is true — the match card then
+   *  renders one unified group (host + these co-riders). */
+  existingRiders?: { userId: string; displayName: string }[];
 }
 
 function loc(lat: number, lng: number, label: string): LocationPoint {
@@ -104,6 +108,7 @@ const MOCK_CANDIDATES: MockCandidate[] = (
       isVerified: true,
       verifiedDomain: "nust.edu.pk",
       rating: { avg_stars: 4.9, rating_count: 18 },
+      existingRiders: [{ userId: "mock-rider-imran", displayName: "Imran R." }],
     },
     {
       userId: "usr-hamza-fast",
@@ -204,6 +209,14 @@ export interface MockMatch {
   /** Only set when matchType === "shared_ride_hailing". */
   sharedFarePkr?: number;
   sharedFareNote?: string;
+  /** Group carpool view when the candidate hosts the trip — mirrors the
+   *  `group` field the live /matches endpoint emits. */
+  group?: {
+    hostUserId: string;
+    hostDisplayName: string;
+    hostTripRequestId?: string;
+    members: { userId: string; displayName: string }[];
+  } | null;
   status: "pending";
 }
 
@@ -437,6 +450,16 @@ function buildMockMatch(
     vehicleType,
     sharedFarePkr,
     sharedFareNote,
+    group: candidateIsOwner
+      ? {
+          hostUserId: cand.userId,
+          hostDisplayName: cand.displayName,
+          members: (cand.existingRiders ?? []).map((r) => ({
+            userId: r.userId,
+            displayName: r.displayName,
+          })),
+        }
+      : null,
     status: "pending",
   };
 }

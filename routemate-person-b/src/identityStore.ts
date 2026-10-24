@@ -89,3 +89,24 @@ export function getIdentityProfilePublic(userId: string) {
 export function getStoredCnic(userId: string): string | null {
   return byUserId.get(userId)?.cnicNumber ?? null;
 }
+
+/** Remembers a CNIC captured outside signup — currently only via the
+ *  vehicle-declaration endpoint, for accounts whose signup predates the
+ *  CNIC step (or whose identity save failed) — so later requests resolve
+ *  it without asking the user to re-type. Never overwrites a real signup
+ *  profile. The institution/document fields are placeholders — no client
+ *  flow collects them here, and the frontend never reads this store back
+ *  (signup only writes; vehicle declaration only calls getStoredCnic). */
+export function rememberCnicIfMissing(userId: string, cnicNumber: string): void {
+  const clean = cnicNumber.trim();
+  if (!userId || !clean || byUserId.has(userId)) return;
+  byUserId.set(userId, {
+    userId,
+    cnicNumber: clean,
+    idDocumentType: "university_card",
+    institutionName: "Provided with vehicle declaration",
+    cardNumber: "",
+    updatedAt: new Date().toISOString(),
+  });
+  persist();
+}

@@ -89,6 +89,13 @@ export interface UserProfile {
   default_max_co_passengers: number; // default pre-fill for new requests
 }
 
+/** RouteSync dual-consent participant roles. The driver is host_driver;
+ *  the first passenger to join (the 1:1 auto-accept) is designated the
+ *  primary rider / host_rider and becomes the second approver; everyone
+ *  who joins after that is a passenger_joiner whose request is approved
+ *  by driver + primary rider only. */
+export type RideParticipantRole = "host_driver" | "host_rider" | "passenger_joiner";
+
 export interface Ride {
   id: string;
   driver_id: string;
@@ -97,6 +104,12 @@ export interface Ride {
    *  candidate, canAddPassenger enforces the mixed-gender 1:1 rule. */
   driver_gender?: Gender;
   driver_preference?: GenderPreference;
+  /** RouteSync dual consent: the primary rider (second approver). Set when
+   *  the first passenger auto-accepts a 1:1 join. Optional so pre-existing
+   *  callers keep compiling. */
+  primary_rider_id?: string | null;
+  /** RouteSync: car_pool vs ride_hail_share. Optional for legacy callers. */
+  ride_mode?: "car_pool" | "ride_hail_share";
   origin: LocationPoint;
   destination: LocationPoint;
   departure_time: string;
@@ -114,6 +127,11 @@ export interface RideBooking {
   pickup_point: LocationPoint;
   dropoff_point: LocationPoint;
   seats_requested: number;
+  /** Party size = seats_requested (ONE booking for the whole party).
+   *  Optional names of the people joining the lead (max 3) so the
+   *  driver knows who is coming. Mirrors ride_bookings.party_member_names
+   *  in supabase/migrations/20261023000000_party_size.sql. */
+  party_member_names?: string[] | null;
   /** max_co_passengers: How many OTHER passengers this rider is willing to share with:
    *  0 = private/solo only, 1 = up to 1 other, N = up to N others, -1 (or null) = no limit */
   max_co_passengers: number;
@@ -122,6 +140,9 @@ export interface RideBooking {
    *  new group (driver + existing passengers + this joiner) before it
    *  becomes "accepted". See ride_consents / respond_to_ride_consent(). */
   status: "pending" | "pending_consent" | "accepted" | "completed" | "cancelled";
+  /** RouteSync dual consent: this booking's participant role. Defaults to
+   *  passenger_joiner when absent (mirrors the DB column default). */
+  role?: RideParticipantRole;
   /** Only set while status === "pending_consent". Past this timestamp
    *  the booking is stale and must be treated as cancelled — see
    *  CONSENT_EXPIRY_MINUTES / expireStaleConsentBookings() in
@@ -186,7 +207,11 @@ export interface PassengerCandidate {
   /** Day 7 group-safety metadata — see Ride.driver_gender note. */
   passenger_gender?: Gender;
   passenger_preference?: GenderPreference;
+  /** = party_size: people travelling together under this one account
+   *  (1..4, lead included). A party is ONE booking, never one per person. */
   seats_requested: number;
+  /** Optional co-traveller names (max 3, excluding the lead). */
+  party_member_names?: string[];
   max_co_passengers: number;
   pickup_point: LocationPoint;
   dropoff_point: LocationPoint;
@@ -208,7 +233,8 @@ export type NotificationKind =
   | "consent_requested" // a join needs this rider's vote
   | "consent_reminder" // ~5 minutes left and this rider hasn't voted yet
   | "consent_resolved" // the group finished voting (accepted or declined)
-  | "consent_expired"; // nobody finished voting in time
+  | "consent_expired" // nobody finished voting in time
+  | "ride_update"; // read-only notice to non-approver riders (their ride changed)
 
 export interface AppNotification {
   id: string;
@@ -227,6 +253,7 @@ export type CapacityRejectionReason =
   | "PASSENGER_CAP_EXCEEDED"
   | "EXISTING_PASSENGER_CAP_VIOLATED"
   | "INSUFFICIENT_SEATS"
+  | "PARTY_TOO_LARGE_FOR_REMAINING_SEATS"
   | "RIDE_NOT_ACTIVE"
   | "GROUP_SAFETY_MIXED_PAIR";
 
@@ -235,6 +262,12 @@ export interface CapacityCheckResult {
   proposedCoPassengerCount: number;
   reason?: CapacityRejectionReason;
   effectiveRideCap?: number;
+  /** Passenger seats still free when a seat-based rejection happened (or
+   *  after a successful check is booked). Set alongside
+   *  PARTY_TOO_LARGE_FOR_REMAINING_SEATS / INSUFFICIENT_SEATS so the UI
+   *  can say "only N seats left". Occupancy is counted in PEOPLE — see
+   *  supabase/migrations/20261023000000_party_size.sql. */
+  remainingSeats?: number;
 }
 
 // ─────────────────────────────────────────────────────────────

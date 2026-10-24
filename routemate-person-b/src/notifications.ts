@@ -78,8 +78,8 @@ export function notificationText(kind: NotificationKind, params: { joinerName: s
   switch (kind) {
     case "consent_requested":
       return {
-        title: "Group approval needed",
-        body: `${params.joinerName} wants to join your shared ride. Everyone in the group needs to agree.`,
+        title: "Approval needed",
+        body: `${params.joinerName} wants to join your shared ride. The driver and primary rider must both approve.`,
       };
     case "consent_reminder":
       return {
@@ -95,6 +95,11 @@ export function notificationText(kind: NotificationKind, params: { joinerName: s
       return {
         title: "Join request expired",
         body: `Nobody finished voting in time, so your request to join was automatically cancelled.`,
+      };
+    case "ride_update":
+      return {
+        title: "Ride update",
+        body: `${params.joinerName} changed your shared ride.`,
       };
   }
 }

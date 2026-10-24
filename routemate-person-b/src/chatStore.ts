@@ -1,12 +1,10 @@
 /**
- * Durable match-chat storage.
- *
- * The old implementation wrote JSON under the server filesystem. That works
- * locally but is ephemeral on Vercel serverless instances, so a restart could
- * orphan a chat ID while the browser still held it. Threads are now stored as
- * JSON objects in a private Supabase Storage bucket using the service role.
+ * Match chat store shared by every browser hitting this API instance.
+ * Persisted to .data/match-chats.json so tsx/watch restarts don't wipe
+ * conversations mid-chat.
  */
-import { createClient } from "@supabase/supabase-js";
+import fs from "fs";
+import path from "path";
 
 export interface StoredChatMessage {
   id: string;
@@ -23,73 +21,68 @@ export interface MatchChatThread {
   destinationLabel: string;
   fareSharePkr: number;
   rideId: string | null;
+  /** Set when the thread is the shared chat of a carpool group
+   *  (host driver + every confirmed rider), not just a 1:1 pair. */
+  groupId?: string | null;
   createdAt: string;
   messages: StoredChatMessage[];
 }
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const BUCKET = "routesync-chat-data";
+const STORE_DIR = path.join(process.cwd(), ".data");
+const STORE_PATH = path.join(STORE_DIR, "match-chats.json");
 
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error("[chatStore] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-}
-
-const supabase = createClient(supabaseUrl, supabaseKey, {
-  auth: { autoRefreshToken: false, persistSession: false },
-});
-
-let bucketReady: Promise<void> | null = null;
-
-async function ensureBucket(): Promise<void> {
-  if (!bucketReady) {
-    bucketReady = (async () => {
-      const { error } = await supabase.storage.createBucket(BUCKET, { public: false });
-      if (error && !/already exists|duplicate/i.test(error.message)) {
-        throw new Error(`Could not initialize chat storage: ${error.message}`);
-      }
-    })().catch((error) => {
-      bucketReady = null;
-      throw error;
-    });
-  }
-  await bucketReady;
-}
-
-function objectPath(threadId: string): string {
-  return `threads/${threadId}.json`;
-}
-
-async function readThread(threadId: string): Promise<MatchChatThread | null> {
-  await ensureBucket();
-  const { data, error } = await supabase.storage.from(BUCKET).download(objectPath(threadId));
-  if (error || !data) return null;
-  try {
-    return JSON.parse(await data.text()) as MatchChatThread;
-  } catch {
-    return null;
-  }
-}
-
-async function writeThread(thread: MatchChatThread): Promise<void> {
-  await ensureBucket();
-  const { error } = await supabase.storage.from(BUCKET).upload(
-    objectPath(thread.id),
-    new Blob([JSON.stringify(thread)], { type: "application/json" }),
-    { contentType: "application/json", upsert: true, cacheControl: "no-cache" }
-  );
-  if (error) throw new Error(`Could not save chat thread: ${error.message}`);
-}
+const threadsById = new Map<string, MatchChatThread>();
+const threadsByPair = new Map<string, string>(); // pairKey -> threadId
+const threadsByGroup = new Map<string, string>(); // groupId -> threadId
 
 function pairKey(a: string, b: string): string {
   return [a, b].sort().join("::");
 }
 
-function threadIdForPair(a: string, b: string): string {
-  return `chat_${pairKey(a, b).replace(/[^a-zA-Z0-9]/g, "_")}`;
+function persist() {
+  try {
+    if (!fs.existsSync(STORE_DIR)) fs.mkdirSync(STORE_DIR, { recursive: true });
+    const payload = {
+      threads: [...threadsById.values()],
+      pairs: [...threadsByPair.entries()],
+      groups: [...threadsByGroup.entries()],
+    };
+    fs.writeFileSync(STORE_PATH, JSON.stringify(payload), "utf8");
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[chatStore] persist failed:", err instanceof Error ? err.message : err);
+  }
 }
 
-export async function upsertMatchChat(input: {
+function hydrate() {
+  try {
+    if (!fs.existsSync(STORE_PATH)) return;
+    const raw = JSON.parse(fs.readFileSync(STORE_PATH, "utf8")) as {
+      threads?: MatchChatThread[];
+      pairs?: [string, string][];
+      groups?: [string, string][];
+    };
+    threadsById.clear();
+    threadsByPair.clear();
+    threadsByGroup.clear();
+    for (const t of raw.threads ?? []) {
+      if (t?.id) threadsById.set(t.id, t);
+    }
+    for (const [k, v] of raw.pairs ?? []) {
+      threadsByPair.set(k, v);
+    }
+    for (const [k, v] of raw.groups ?? []) {
+      threadsByGroup.set(k, v);
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[chatStore] hydrate failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+hydrate();
+
+export function upsertMatchChat(input: {
   myUserId: string;
   myDisplayName: string;
   peerUserId: string;
@@ -98,22 +91,37 @@ export async function upsertMatchChat(input: {
   destinationLabel: string;
   fareSharePkr: number;
   rideId?: string | null;
-}): Promise<MatchChatThread> {
-  const id = threadIdForPair(input.myUserId, input.peerUserId);
-  const existing = await readThread(id);
-  if (existing) {
-    if (!existing.participantIds.includes(input.myUserId)) existing.participantIds.push(input.myUserId);
-    if (!existing.participantIds.includes(input.peerUserId)) existing.participantIds.push(input.peerUserId);
-    existing.participantNames[input.myUserId] = input.myDisplayName || existing.participantNames[input.myUserId] || "You";
-    existing.participantNames[input.peerUserId] = input.peerDisplayName || existing.participantNames[input.peerUserId] || "Carpool mate";
-    if (input.rideId) existing.rideId = input.rideId;
-    if (input.originLabel) existing.originLabel = input.originLabel;
-    if (input.destinationLabel) existing.destinationLabel = input.destinationLabel;
-    if (Number.isFinite(input.fareSharePkr)) existing.fareSharePkr = input.fareSharePkr;
-    await writeThread(existing);
-    return existing;
+  groupId?: string | null;
+}): MatchChatThread {
+  const key = pairKey(input.myUserId, input.peerUserId);
+  const existingId = threadsByPair.get(key);
+  if (existingId) {
+    const existing = threadsById.get(existingId);
+    if (existing) {
+      if (!existing.participantIds.includes(input.myUserId)) {
+        existing.participantIds.push(input.myUserId);
+      }
+      if (!existing.participantIds.includes(input.peerUserId)) {
+        existing.participantIds.push(input.peerUserId);
+      }
+      existing.participantNames[input.myUserId] =
+        input.myDisplayName || existing.participantNames[input.myUserId];
+      existing.participantNames[input.peerUserId] =
+        input.peerDisplayName || existing.participantNames[input.peerUserId];
+      if (input.rideId) existing.rideId = input.rideId;
+      if (input.groupId && !existing.groupId) {
+        existing.groupId = input.groupId;
+        threadsByGroup.set(input.groupId, existing.id);
+      }
+      if (input.originLabel) existing.originLabel = input.originLabel;
+      if (input.destinationLabel) existing.destinationLabel = input.destinationLabel;
+      if (Number.isFinite(input.fareSharePkr)) existing.fareSharePkr = input.fareSharePkr;
+      persist();
+      return existing;
+    }
   }
 
+  const id = `chat_${key.replace(/[^a-zA-Z0-9]/g, "_")}`;
   const thread: MatchChatThread = {
     id,
     participantIds: [input.myUserId, input.peerUserId],
@@ -125,38 +133,57 @@ export async function upsertMatchChat(input: {
     destinationLabel: input.destinationLabel || "Drop-off",
     fareSharePkr: Number.isFinite(input.fareSharePkr) ? input.fareSharePkr : 0,
     rideId: input.rideId ?? null,
+    groupId: input.groupId ?? null,
     createdAt: new Date().toISOString(),
     messages: [],
   };
-  await writeThread(thread);
+  threadsById.set(id, thread);
+  threadsByPair.set(key, id);
+  if (input.groupId) threadsByGroup.set(input.groupId, id);
+  persist();
   return thread;
 }
 
-export async function getMatchChat(threadId: string): Promise<MatchChatThread | null> {
-  return readThread(threadId);
+export function getMatchChat(threadId: string): MatchChatThread | null {
+  return threadsById.get(threadId) ?? null;
 }
 
-export async function listMatchChatsForUser(userId: string): Promise<MatchChatThread[]> {
-  await ensureBucket();
-  const { data, error } = await supabase.storage.from(BUCKET).list("threads", { limit: 1000 });
-  if (error) throw new Error(`Could not list chat threads: ${error.message}`);
-  const threads = await Promise.all(
-    (data ?? [])
-      .filter((entry) => entry.name.endsWith(".json"))
-      .map((entry) => readThread(entry.name.slice(0, -5)))
-  );
-  return threads
-    .filter((thread): thread is MatchChatThread => Boolean(thread && thread.participantIds.includes(userId)))
+/** The shared thread for a carpool group, if one has been opened. */
+export function getGroupChat(groupId: string): MatchChatThread | null {
+  const id = threadsByGroup.get(groupId);
+  return id ? threadsById.get(id) ?? null : null;
+}
+
+/** Adds a participant (idempotent) — how a newly confirmed rider joins
+ *  the group thread that earlier riders and the host already share. */
+export function addChatParticipant(
+  threadId: string,
+  userId: string,
+  displayName?: string
+): boolean {
+  const thread = threadsById.get(threadId);
+  if (!thread || !userId) return false;
+  if (displayName) thread.participantNames[userId] = displayName;
+  if (thread.participantIds.includes(userId)) return true;
+  thread.participantIds.push(userId);
+  persist();
+  return true;
+}
+
+export function listMatchChatsForUser(userId: string): MatchChatThread[] {
+  return [...threadsById.values()]
+    .filter((t) => t.participantIds.includes(userId))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-export async function addMatchChatMessage(
+export function addMatchChatMessage(
   threadId: string,
   senderId: string,
   text: string
-): Promise<StoredChatMessage | null> {
-  const thread = await readThread(threadId);
-  if (!thread || !thread.participantIds.includes(senderId)) return null;
+): StoredChatMessage | null {
+  const thread = threadsById.get(threadId);
+  if (!thread) return null;
+  if (!thread.participantIds.includes(senderId)) return null;
   const trimmed = text.trim();
   if (!trimmed) return null;
 
@@ -167,27 +194,30 @@ export async function addMatchChatMessage(
     createdAt: new Date().toISOString(),
   };
   thread.messages.push(msg);
-  if (thread.messages.length > 500) thread.messages.splice(0, thread.messages.length - 500);
-  await writeThread(thread);
+  if (thread.messages.length > 500) {
+    thread.messages.splice(0, thread.messages.length - 500);
+  }
+  persist();
   return msg;
 }
 
-export async function userCanAccessChat(threadId: string, userId: string): Promise<boolean> {
-  const thread = await readThread(threadId);
+export function userCanAccessChat(threadId: string, userId: string): boolean {
+  const thread = threadsById.get(threadId);
   return Boolean(thread && thread.participantIds.includes(userId));
 }
 
 /** If any known alias of this user is already on the thread, add userId too. */
-export async function grantChatAccessIfAlias(
+export function grantChatAccessIfAlias(
   threadId: string,
   userId: string,
   aliases: string[]
-): Promise<boolean> {
-  const thread = await readThread(threadId);
+): boolean {
+  const thread = threadsById.get(threadId);
   if (!thread) return false;
   if (thread.participantIds.includes(userId)) return true;
-  if (!aliases.some((alias) => alias && thread.participantIds.includes(alias))) return false;
+  const hit = aliases.some((a) => a && thread.participantIds.includes(a));
+  if (!hit) return false;
   thread.participantIds.push(userId);
-  await writeThread(thread);
+  persist();
   return true;
 }

@@ -2,18 +2,9 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
-import path from "node:path";
 import { matchesRouter } from "./apiHandler";
 
 const app = express();
-
-// Vercel terminates the client connection before forwarding requests to this
-// Express function. Trust that single proxy so express-rate-limit can safely
-// resolve the real client IP from Forwarded/X-Forwarded-For instead of
-// treating Vercel's headers as a validation error.
-if (process.env.VERCEL) {
-  app.set("trust proxy", 1);
-}
 
 app.use(cors());
 app.use(express.json());
@@ -35,18 +26,10 @@ app.use(
 
 app.use(matchesRouter);
 
-// In production the Express container serves the Vite build and the API from
-// one origin. The Vite dev server remains responsible for local development.
-const webRoot = path.resolve(__dirname, "../dist-web");
-app.use(express.static(webRoot));
-app.get(/^(?!\/api(?:\/|$)|\/health$).*/, (_req, res) => {
-  res.sendFile(path.join(webRoot, "index.html"));
-});
-
 // Vercel imports this module as a serverless function. Keep the listener for
 // local development, but never start a long-lived socket in that environment.
 if (!process.env.VERCEL) {
-  const port = Number(process.env.PORT) || 3000;
+  const port = Number(process.env.PORT) || 3001;
   app.listen(port, () => {
     // eslint-disable-next-line no-console
     console.log(`[server] RouteSync API listening on http://localhost:${port}`);

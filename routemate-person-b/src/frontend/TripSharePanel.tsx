@@ -1,21 +1,76 @@
 /* Day 7 Feature 2: "Share my trip" — a zero-cost live location link.
    Uses navigator.geolocation.watchPosition and rebuilds a Google Maps
    link as the position updates; the link is refreshed at most every
-   30s to keep shared URLs stable. No backend, no SMS, no paid API. */
+   30s to keep shared URLs stable. No SMS, no paid API.
+
+   RouteSync Phase 4: when a rideId is supplied the same fix is also
+   mirrored to the backend (POST /api/rides/:id/tracking then /location)
+   so fellow riders can see this member on the live ride map. The public
+   link still works standalone; backend sharing degrades gracefully if
+   the migration isn't applied yet or the caller isn't an accepted rider. */
 import { useEffect, useRef, useState } from "react";
 import { buildGoogleMapsLink } from "../safety";
+import { API_URL } from "./apiBase";
+import { authedFetch } from "./demoAuth";
 
 const REFRESH_INTERVAL_MS = 30_000;
+// Spec: push a position to the ride map every 5-10s while sharing.
+const PUSH_INTERVAL_MS = 8_000;
 
-export default function TripSharePanel() {
+type BackendShareState = "off" | "on" | "unavailable";
+
+export interface TripSharePanelProps {
+  /** When set, positions are also mirrored to this ride's live map. */
+  rideId?: string | null;
+}
+
+export default function TripSharePanel({ rideId }: TripSharePanelProps) {
   const [sharing, setSharing] = useState(false);
   const [link, setLink] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [backend, setBackend] = useState<BackendShareState>("off");
 
   const watchIdRef = useRef<number | null>(null);
   const lastLinkAtRef = useRef<number>(0);
+  const lastPushAtRef = useRef<number>(0);
+  // Mirrors whether backend tracking is live, so the geolocation callback
+  // (a stable closure) can decide to push without re-reading async state.
+  const backendRef = useRef<boolean>(false);
+
+  async function setRideTracking(enabled: boolean): Promise<boolean> {
+    if (!rideId) return false;
+    try {
+      const res = await authedFetch(
+        `${API_URL}/api/rides/${encodeURIComponent(rideId)}/tracking`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        }
+      );
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function pushRidePosition(lat: number, lng: number): Promise<void> {
+    if (!rideId) return;
+    try {
+      await authedFetch(
+        `${API_URL}/api/rides/${encodeURIComponent(rideId)}/location`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lat, lng }),
+        }
+      );
+    } catch {
+      /* transient network blip — the next fix retries */
+    }
+  }
 
   useEffect(() => {
     if (!sharing) return;
@@ -27,14 +82,31 @@ export default function TripSharePanel() {
       return;
     }
 
+    // When attached to a ride, also mirror the position to the backend map.
+    backendRef.current = false;
+    if (rideId) {
+      setBackend("off");
+      void (async () => {
+        const ok = await setRideTracking(true);
+        backendRef.current = ok;
+        setBackend(ok ? "on" : "unavailable");
+      })();
+    }
+
     watchIdRef.current = navigator.geolocation.watchPosition(
       (pos) => {
+        const { latitude, longitude } = pos.coords;
         const now = Date.now();
         // Throttle link churn: a fresh URL at most every 30s.
         if (now - lastLinkAtRef.current >= REFRESH_INTERVAL_MS || lastLinkAtRef.current === 0) {
           lastLinkAtRef.current = now;
-          setLink(buildGoogleMapsLink(pos.coords.latitude, pos.coords.longitude));
+          setLink(buildGoogleMapsLink(latitude, longitude));
           setUpdatedAt(new Date());
+        }
+        // Push to the ride map on its own, tighter cadence (5-10s).
+        if (backendRef.current && now - lastPushAtRef.current >= PUSH_INTERVAL_MS) {
+          lastPushAtRef.current = now;
+          void pushRidePosition(latitude, longitude);
         }
       },
       (err) => {
@@ -54,8 +126,15 @@ export default function TripSharePanel() {
         watchIdRef.current = null;
       }
       lastLinkAtRef.current = 0;
+      lastPushAtRef.current = 0;
+      if (rideId && backendRef.current) {
+        backendRef.current = false;
+        void setRideTracking(false);
+        setBackend("off");
+      }
     };
-  }, [sharing]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sharing, rideId]);
 
   async function handleCopy() {
     if (!link) return;
@@ -124,6 +203,17 @@ export default function TripSharePanel() {
       </div>
 
       {error && <div style={{ fontSize: "12px", color: "var(--rm-danger)" }}>{error}</div>}
+
+      {rideId && sharing && backend === "on" && (
+        <div style={{ fontSize: "11px", color: "var(--rm-route-green)" }}>
+          🛰️ Sharing your live position with this ride's members.
+        </div>
+      )}
+      {rideId && sharing && backend === "unavailable" && (
+        <div style={{ fontSize: "11px", color: "var(--rm-ink-soft)" }}>
+          Live ride map isn't available yet — the link above still works for anyone you send it to.
+        </div>
+      )}
 
       {sharing && link && (
         <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
