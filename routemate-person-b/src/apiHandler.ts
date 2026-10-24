@@ -3818,17 +3818,25 @@ matchesRouter.post(
       });
     }
 
-    const created = await durableCreateMatchRequest(supabase, {
-      fromUserId: canonicalFrom,
-      fromName: (await lookupDisplayName(canonicalFrom)) ?? "You",
-      toUserId: canonicalTo,
-      toName: (await lookupDisplayName(canonicalTo)) ?? "Carpool mate",
-      fromTripRequestId: typeof from_trip_request_id === "string" ? from_trip_request_id : null,
-      toTripRequestId: typeof to_trip_request_id === "string" ? to_trip_request_id : null,
-      preferences,
-      snapshot,
-      group,
-    });
+    let created: MatchRequest;
+    try {
+      created = await durableCreateMatchRequest(supabase, {
+        fromUserId: canonicalFrom,
+        fromName: (await lookupDisplayName(canonicalFrom)) ?? "You",
+        toUserId: canonicalTo,
+        toName: (await lookupDisplayName(canonicalTo)) ?? "Carpool mate",
+        fromTripRequestId: typeof from_trip_request_id === "string" ? from_trip_request_id : null,
+        toTripRequestId: typeof to_trip_request_id === "string" ? to_trip_request_id : null,
+        preferences,
+        snapshot,
+        group,
+      });
+    } catch (error) {
+      return res.status(500).json({
+        error: "MATCH_REQUEST_CREATE_FAILED",
+        details: error instanceof Error ? error.message : "The persistent request store is unavailable.",
+      });
+    }
     return res.status(201).json({ request: serializeMatchRequest(created, viewerAliases) });
   }
 );
