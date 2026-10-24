@@ -717,21 +717,6 @@ export default function App() {
     const srcMatch = matches.find((m) => m.candidateUserId === peerId);
     setMatches((prev) => prev.filter((m) => m.candidateUserId !== peerId));
 
-    // Open the confirmed chat immediately. Ride creation/attachment below is
-    // best-effort metadata and must not delay the user's first view of the
-    // conversation after they press the final Confirm button.
-    setActiveChatMatch({
-      id: chatId,
-      chatId,
-      candidateDisplayName: request.peer_name,
-      candidatePhone: "Use in-app chat",
-      candidateSectorFrom: request.snapshot.origin_label,
-      candidateSectorTo: request.snapshot.destination_label,
-      fareSharePKR: request.snapshot.fare_share_from_pkr ?? 0,
-      sharedDistanceKm: 8.5,
-      riderCount: 2,
-    });
-
     // The ride row belongs to the CAR, and finalize resolves it server-side:
     // one row per car, owned by whoever hosts it, with each confirmed rider
     // booked onto it. Minting a row here per confirmation is what made one
@@ -1558,3 +1543,4 @@ export default function App() {
     </div>
   );
 }
+
