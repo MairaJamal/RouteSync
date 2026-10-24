@@ -76,6 +76,18 @@ import {
   RequestVehicleType,
   RequestMatchType,
 } from "./frontend/matchrequeststore";
+import {
+  durableCreateMatchRequest,
+  durableGetMatchRequest,
+  durableListRequestsForUser,
+  durableFindOpenRequest,
+  durableUpdatePendingRequest,
+  durableRespondToRequest,
+  durableFinalizeRequest,
+  durableCancelRequest,
+  durableAttachChat,
+  durableHasConfirmedRequest,
+} from "./durableMatchRequestStore";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -3778,15 +3790,14 @@ matchesRouter.post(
 
     const viewerAliases = viewerAliasesFor(authId, canonicalFrom, ...(await resolveUserAliases(authId)));
 
-    expireStaleMatchRequests();
     const myAliasList = viewerAliases;
     const peerAliasList = viewerAliasesFor(to_user_id, canonicalTo, ...(await resolveUserAliases(to_user_id)));
-    const open = findOpenRequestBetween(myAliasList, peerAliasList);
+    const open = await durableFindOpenRequest(supabase, myAliasList, peerAliasList);
     if (open) {
       // Re-sending while MY request to them is still pending just edits
       // it in place (e.g. they tweaked departure time and hit send again).
       if (open.status === "pending" && isRequester(open, myAliasList)) {
-        const updated = updatePendingRequest(open.id, {
+        const updated = await durableUpdatePendingRequest(supabase, open.id, {
           preferences,
           snapshot,
           toTripRequestId:
@@ -3807,17 +3818,25 @@ matchesRouter.post(
       });
     }
 
-    const created = createMatchRequest({
-      fromUserId: canonicalFrom,
-      fromName: (await lookupDisplayName(canonicalFrom)) ?? "You",
-      toUserId: canonicalTo,
-      toName: (await lookupDisplayName(canonicalTo)) ?? "Carpool mate",
-      fromTripRequestId: typeof from_trip_request_id === "string" ? from_trip_request_id : null,
-      toTripRequestId: typeof to_trip_request_id === "string" ? to_trip_request_id : null,
-      preferences,
-      snapshot,
-      group,
-    });
+    let created: MatchRequest;
+    try {
+      created = await durableCreateMatchRequest(supabase, {
+        fromUserId: canonicalFrom,
+        fromName: (await lookupDisplayName(canonicalFrom)) ?? "You",
+        toUserId: canonicalTo,
+        toName: (await lookupDisplayName(canonicalTo)) ?? "Carpool mate",
+        fromTripRequestId: typeof from_trip_request_id === "string" ? from_trip_request_id : null,
+        toTripRequestId: typeof to_trip_request_id === "string" ? to_trip_request_id : null,
+        preferences,
+        snapshot,
+        group,
+      });
+    } catch (error) {
+      return res.status(500).json({
+        error: "MATCH_REQUEST_CREATE_FAILED",
+        details: error instanceof Error ? error.message : "The persistent request store is unavailable.",
+      });
+    }
     return res.status(201).json({ request: serializeMatchRequest(created, viewerAliases) });
   }
 );
@@ -3848,8 +3867,7 @@ matchesRouter.get(
       ...(await resolveUserAliases(pathId))
     );
 
-    expireStaleMatchRequests();
-    const all = listRequestsForUser(viewerAliases);
+    const all = await durableListRequestsForUser(supabase, viewerAliases);
     return res.json({
       incoming: all
         .filter((r) => isRecipient(r, viewerAliases))
@@ -3868,8 +3886,7 @@ matchesRouter.post(
     const authId = req.auth!.userId;
     const viewerAliases = viewerAliasesFor(authId, ...(await resolveUserAliases(authId)));
 
-    expireStaleMatchRequests();
-    const request = getMatchRequest(String(req.params.id));
+    const request = await durableGetMatchRequest(supabase, String(req.params.id));
     if (!request) return res.status(404).json({ error: "MATCH_REQUEST_NOT_FOUND" });
     if (!isRecipient(request, viewerAliases)) {
       return res.status(403).json({ error: "NOT_RECIPIENT" });
@@ -3884,7 +3901,7 @@ matchesRouter.post(
     }
 
     if (decision === "decline") {
-      const declined = respondToRequest(request.id, "decline");
+      const declined = await durableRespondToRequest(supabase, request.id, "decline");
       if (!declined) return res.status(409).json({ error: "REQUEST_NOT_PENDING" });
       return res.json({ request: serializeMatchRequest(declined, viewerAliases) });
     }
@@ -3917,7 +3934,7 @@ matchesRouter.post(
       fareAgreed: true,
       note: cleanText(raw.note, 500),
     };
-    const accepted = respondToRequest(request.id, "accept", conditions);
+    const accepted = await durableRespondToRequest(supabase, request.id, "accept", conditions);
     if (!accepted) return res.status(409).json({ error: "REQUEST_NOT_PENDING" });
     return res.json({ request: serializeMatchRequest(accepted, viewerAliases) });
   }
@@ -3930,8 +3947,7 @@ matchesRouter.post(
     const authId = req.auth!.userId;
     const viewerAliases = viewerAliasesFor(authId, ...(await resolveUserAliases(authId)));
 
-    expireStaleMatchRequests();
-    const request = getMatchRequest(String(req.params.id));
+    const request = await durableGetMatchRequest(supabase, String(req.params.id));
     if (!request) return res.status(404).json({ error: "MATCH_REQUEST_NOT_FOUND" });
     if (!isRequester(request, viewerAliases)) {
       return res.status(403).json({ error: "NOT_REQUESTER" });
@@ -3944,7 +3960,7 @@ matchesRouter.post(
     if (decision !== "confirm" && decision !== "withdraw") {
       return res.status(400).json({ error: "INVALID_DECISION" });
     }
-    const finalized = finalizeRequest(request.id, decision);
+    const finalized = await durableFinalizeRequest(supabase, request.id, decision);
     if (!finalized) return res.status(409).json({ error: "REQUEST_NOT_AWAITING_YOU" });
 
     if (decision === "withdraw") {
@@ -4004,7 +4020,7 @@ matchesRouter.post(
         groupId,
       });
     }
-    const withChat = attachChatToRequest(finalized.id, thread.id);
+    const withChat = await durableAttachChat(supabase, finalized.id, thread.id);
     return res.json({
       request: serializeMatchRequest(withChat ?? finalized, viewerAliases),
       chat_id: thread.id,
@@ -4020,13 +4036,12 @@ matchesRouter.post(
     const authId = req.auth!.userId;
     const viewerAliases = viewerAliasesFor(authId, ...(await resolveUserAliases(authId)));
 
-    expireStaleMatchRequests();
-    const request = getMatchRequest(String(req.params.id));
+    const request = await durableGetMatchRequest(supabase, String(req.params.id));
     if (!request) return res.status(404).json({ error: "MATCH_REQUEST_NOT_FOUND" });
     if (!isRequester(request, viewerAliases)) {
       return res.status(403).json({ error: "NOT_REQUESTER" });
     }
-    const cancelled = cancelRequest(request.id);
+    const cancelled = await durableCancelRequest(supabase, request.id);
     if (!cancelled) {
       return res.status(409).json({ error: "REQUEST_NOT_OPEN" });
     }
