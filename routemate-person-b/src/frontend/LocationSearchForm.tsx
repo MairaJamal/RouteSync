@@ -306,12 +306,14 @@ export default function LocationSearchForm({
   defaultMaxCoPassengers = 3,
   currentUserGender,
   initialUserRole = "LOOKING",
+  onRoleChange,
 }: {
   onSubmit: (value: TripSearchValue) => void;
   defaultMaxCoPassengers?: number;
   currentUserGender?: Gender;
   /** Prefill from signup (driver vs passenger). */
   initialUserRole?: UserRole;
+  onRoleChange?: (role: UserRole) => void;
 }) {
   const [pickup, setPickup] = useState<FieldState>(emptyField);
   const [dropoff, setDropoff] = useState<FieldState>(emptyField);
@@ -380,6 +382,7 @@ export default function LocationSearchForm({
    *  passengers always start on join-a-driver. */
   function handleRoleChange(role: UserRole) {
     setUserRole(role);
+    onRoleChange?.(role);
     if (role === "OFFERING") {
       setRequireDriverGenderMatch(false);
       setRideHailingFareInput("");
@@ -1127,4 +1130,3 @@ export default function LocationSearchForm({
     </div>
   );
 }
-
